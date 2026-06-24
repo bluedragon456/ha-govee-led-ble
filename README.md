@@ -11,7 +11,7 @@ Local BLE control of supported Govee LED strips from Home Assistant — no cloud
 
 All models support on/off, brightness, RGB color, color temperature, and state readback.
 
-- **H617A** — LED Strip · 80+ scenes · music mode
+- **H617A/H617E** — Bluetooth RGBIC LED Strip · 80+ preset scenes · music mode
 - **H6199** — DreamView T1 · video & music modes · advanced controls
 
 ## Installation
@@ -28,7 +28,11 @@ Copy `custom_components/ha_govee_led_ble/` into your HA `custom_components/` dir
 
 ## Configuration
 
-The integration auto-discovers nearby supported devices.
+The integration auto-discovers nearby supported devices. It uses BLE writes only and does not pair with, claim, or permanently reconfigure controllers, so the official Govee app remains usable and devices keep working from the app when Home Assistant is offline.
+
+### Scenes and DIY effects
+
+H617E is registered as an alias of the existing H617A BLE profile because available product information identifies H617A/C/E/F as the same Bluetooth-only RGBIC strip family, and the effect surface (preset scenes plus music modes) matches the H617A implementation. Built-in preset scenes are sent with the same BLE scene packets as H617A. DIY scenes are not implemented: current evidence indicates DIY/inspiration content is managed by the Govee app/community/cloud experience and the local BLE API does not expose a stable, enumerable DIY-scene catalogue suitable for maintainable Home Assistant entities.
 
 To add manually in Home Assistant:
 
