@@ -24,16 +24,29 @@ MUSIC_EFFECTS: tuple[str, ...] = ("music: energic", "music: rhythm", "music: spe
 VIDEO_EFFECTS: tuple[str, ...] = ("video: movie", "video: game")
 
 
+H617X_PROFILE = ModelProfile(
+    "H617A/H617E LED Strip",
+    state_readable=True,
+    scene_source="api",
+    effects=[*MUSIC_EFFECTS],
+    ble_name_prefixes=[
+        "ihoment_H617A",
+        "Govee_H617A",
+        "GBK_H617A",
+        "GVH_H617A",
+        "ihoment_H617E",
+        "Govee_H617E",
+        "GBK_H617E",
+        "GVH_H617E",
+    ],
+    supports_music_mode=True,
+    supports_music_calm=True,
+)
+
+
 MODEL_PROFILES: dict[str, ModelProfile] = {
-    "H617A": ModelProfile(
-        "H617A LED Strip",
-        state_readable=True,
-        scene_source="api",
-        effects=[*MUSIC_EFFECTS],
-        ble_name_prefixes=["ihoment_H617A", "Govee_H617A", "GBK_H617A", "GVH_H617A"],
-        supports_music_mode=True,
-        supports_music_calm=True,
-    ),
+    "H617A": H617X_PROFILE,
+    "H617E": H617X_PROFILE,
     "H6199": ModelProfile(
         "H6199 DreamView T1",
         state_readable=True,

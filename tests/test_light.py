@@ -108,6 +108,7 @@ async def test_power_rollback(light, mock_coordinator):
 
 
 def test_effect_lists(h6199_light, light):
+    assert MODEL_PROFILES["H617E"] is MODEL_PROFILES["H617A"]
     assert len(light.effect_list) == len(SCENES) + len(MODEL_PROFILES["H617A"].effects)
     assert len(h6199_light.effect_list) == len(MODEL_PROFILES["H6199"].effects)
     assert "music: energic" in light.effect_list and "video: movie" not in light.effect_list
