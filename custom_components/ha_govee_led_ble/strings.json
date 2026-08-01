@@ -275,7 +275,7 @@
     },
     "set_music_mode": {
       "name": "Set music mode",
-      "description": "Configure the music mode on supported models (H617A/H6199).",
+      "description": "Configure the music mode on supported models (H617A/H617E/H6199).",
       "fields": {
         "mode": {
           "name": "Mode",
@@ -307,7 +307,7 @@
     },
     "paint_segments": {
       "name": "Paint segments",
-      "description": "Paint one or more color groups onto the addressable segments (H617A).",
+      "description": "Paint one or more color groups onto the addressable segments (H617A/H617E).",
       "fields": {
         "groups": {
           "name": "Groups",
