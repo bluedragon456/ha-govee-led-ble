@@ -16,6 +16,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from .advertisement import parse_govee_advertisement
 from .ble_connection import RETRY_BACKOFF_SECONDS, async_establish_ble_connection
 from .ble_device_resolver import BLEDeviceResolver
 from .const import (
@@ -49,6 +50,8 @@ from .generated_protocol_adapter import (
     parse_command_ack_result,
     parse_command_result,
 )
+from .govee_encryption import GoveeCryptoError
+from .govee_encryption.session import GoveeEncryptionSession
 from .h6199_calibration import WHITE_BALANCE_RESET
 from .light_commands import (
     SegmentColorGroup,
@@ -154,6 +157,10 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         self.always_include_custom_effects = always_include_custom_effects
         self._device_resolver = BLEDeviceResolver() if device_resolver is None else device_resolver
         self._client: BleakClient | None = None
+        self._encryption: GoveeEncryptionSession | None = None
+        self._advertised_encryption = False
+        self._connection_initializing = False
+        self._notification_token: object | None = None
         self._lock = asyncio.Lock()
         self._control_arbiter = BLEControlArbiter()
         self._control_lock = self._control_arbiter
@@ -536,6 +543,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
     async def _async_setup(self) -> None:
         """Register BLE presence tracking once, before the first refresh (HA idiom)."""
         self._present = bluetooth.async_address_present(self.hass, self.address, connectable=True)
+        self._note_advertisement(bluetooth.async_last_service_info(self.hass, self.address, connectable=True))
         unsubs = (
             bluetooth.async_register_callback(
                 self.hass,
@@ -553,7 +561,16 @@ class GoveeBLECoordinator(_ActiveModeMixin):
     def _async_on_advertisement(
         self, _service_info: bluetooth.BluetoothServiceInfoBleak, _change: bluetooth.BluetoothChange
     ) -> None:
+        self._note_advertisement(_service_info)
         self._set_present(True)
+
+    def _note_advertisement(self, service_info: bluetooth.BluetoothServiceInfoBleak | None) -> None:
+        if service_info is not None and isinstance(service_info.manufacturer_data, Mapping):
+            advertisement = parse_govee_advertisement(service_info.manufacturer_data)
+            if advertisement is not None and advertisement.supports_encryption:
+                self._advertised_encryption = True
+                if self._encryption is not None and self._encryption.version == 0:
+                    self._encryption.reset()
 
     @callback
     def _async_on_unavailable(self, _service_info: bluetooth.BluetoothServiceInfoBleak) -> None:
@@ -626,8 +643,10 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         return {field: getattr(self, field) for field in _CORE_STATE_FIELDS}
 
     async def _ensure_connected(self) -> BleakClient:
+        if self._connection_initializing:
+            raise GoveeCryptoError("connection_setup_in_progress")
         if self._client and self._client.is_connected:
-            if not self._receive_is_stale():
+            if (self._encryption is None or self._encryption.ready) and not self._receive_is_stale():
                 self._renew_foreground_lease()
                 return self._client
             _LOGGER.debug("Reconnecting stale notification stream for %s", self.address)
@@ -636,24 +655,43 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             setattr(self, condition.identity_field, None)
         if self._client and self._client.is_connected:
             await self._disconnect_locked()
-        self._client = await async_establish_ble_connection(
-            self.hass,
-            self.address,
-            resolver=self._device_resolver,
-            establish=establish_connection,
-            sleep=asyncio.sleep,
-            disconnected_callback=self._disconnected_callback,
-        )
-        self._reset_disconnect_timer()
-        if self.profile.requires_notifications:
-            try:
+        self._connection_initializing = True
+        if self._encryption is None:
+            self._encryption = GoveeEncryptionSession()
+        self._encryption.reset()
+        try:
+            self._client = client = await async_establish_ble_connection(
+                self.hass,
+                self.address,
+                resolver=self._device_resolver,
+                establish=establish_connection,
+                sleep=asyncio.sleep,
+                disconnected_callback=self._disconnected_callback,
+            )
+            self._reset_disconnect_timer()
+            await self._encryption.async_select(client, advertised=self._advertised_encryption)
+            if self._client is not client or not client.is_connected:
+                raise GoveeCryptoError("disconnected_during_selection")
+            if self.profile.requires_notifications or self._encryption.version:
                 await self._start_notify()
+            await self._encryption.async_negotiate(client)
+            if self._client is not client or not client.is_connected:
+                raise GoveeCryptoError("disconnected_during_setup")
+            if self.profile.requires_notifications:
                 await self._send_identity_queries()
-            except BleakError, ValueError:
-                await self._disconnect_locked()
-                raise
+            if self._client is not client or not client.is_connected or not self._encryption.ready:
+                raise GoveeCryptoError("disconnected_during_setup")
+            if self.profile.state_readable and self._notify_started_monotonic is not None:
+                self._start_keep_alive()
+        except BaseException as err:
+            await self._disconnect_locked()
+            if isinstance(err, Exception) and self._encryption.version and not isinstance(err, GoveeCryptoError):
+                raise GoveeCryptoError("encrypted_setup_failed") from None
+            raise
+        finally:
+            self._connection_initializing = False
         self._log_availability_transition()
-        return self._client
+        return client
 
     def _renew_foreground_lease(self) -> None:
         if self._control_arbiter.current_task_intent is not ControlIntent.BACKGROUND:
@@ -700,6 +738,9 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         if self._client is not client:
             return
         self._client = None
+        self._notification_token = None
+        if self._encryption is not None:
+            self._encryption.reset()
         self._notify_started_monotonic = None
         self._last_rx_monotonic = None
         self._expected_state.clear()
@@ -712,11 +753,18 @@ class GoveeBLECoordinator(_ActiveModeMixin):
     async def _start_notify(self) -> None:
         if not (self._client and self._client.is_connected):
             return
-        await self._client.start_notify(READ_UUID, self._notify_callback)
+        client = self._client
+        token = self._notification_token = object()
+
+        def receive(sender: Any, data: bytearray) -> None:
+            if self._client is client and self._notification_token is token and client.is_connected:
+                self._notify_callback(sender, data)
+
+        await client.start_notify(READ_UUID, receive)
+        if self._client is not client or self._notification_token is not token:
+            raise GoveeCryptoError("disconnected_during_subscription")
         self._notify_started_monotonic = time.monotonic()
         self._last_rx_monotonic = None
-        if self.profile.state_readable:
-            self._start_keep_alive()
 
     def _receive_is_stale(self) -> bool:
         baseline = self._last_rx_monotonic
@@ -987,6 +1035,11 @@ class GoveeBLECoordinator(_ActiveModeMixin):
 
     def _notify_callback(self, _sender: Any, data: bytearray) -> None:
         frame = bytes(data)
+        if self._encryption is not None:
+            decoded_frame = self._encryption.decode(frame)
+            if decoded_frame is None:
+                return
+            frame = decoded_frame
         self._last_rx_monotonic = time.monotonic()
         if frame[:1] == b"\x33":
             command = parse_command_ack_result(frame, self.model)
@@ -1151,6 +1204,10 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             wire_packet = transform(packet)
             if not isinstance(wire_packet, bytes) or not wire_packet:
                 raise ValueError("Outbound transform must return non-empty bytes")
+        if self._encryption is not None:
+            if self._client is not client or not client.is_connected:
+                raise GoveeCryptoError("stale_connection")
+            wire_packet = self._encryption.encode(wire_packet)
         if before_write is not None:
             before_write()
         if state_values is not None:
@@ -1162,7 +1219,19 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             self._arm_expected_values(dict(expected_values))
         if arm_expected:
             self.control_write_attempts += 1
-        await client.write_gatt_char(WRITE_UUID, wire_packet, response=False)
+        try:
+            await client.write_gatt_char(WRITE_UUID, wire_packet, response=False)
+        except asyncio.CancelledError:
+            if self._encryption is not None:
+                await self._disconnect_locked()
+            raise
+        except Exception as err:
+            if self._encryption is not None and self._encryption.version:
+                await self._disconnect_locked()
+                if isinstance(err, BleakError):
+                    raise BleakError("encrypted_write_failed") from None
+                raise GoveeCryptoError("encrypted_write_failed") from None
+            raise
         self._record_packet("tx", wire_packet, outcome="sent", reason="write_succeeded")
 
     async def _send_state_queries(
@@ -1661,6 +1730,10 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                             if progress is not None:
                                 await progress(index)
                         return
+                    except asyncio.CancelledError:
+                        if self._encryption is not None:
+                            await self._disconnect_locked()
+                        raise
                     except (BleakError, TimeoutError) as err:
                         await self._disconnect_locked()
                         if self.hass.is_stopping:
@@ -1971,6 +2044,10 @@ class GoveeBLECoordinator(_ActiveModeMixin):
 
     async def _disconnect_locked(self) -> None:
         client = self._client
+        # Invalidate callbacks and keys before disconnect can yield or be cancelled.
+        self._notification_token = None
+        if self._encryption is not None:
+            self._encryption.reset()
         self._stop_keep_alive()
         if self._cancel_disconnect:
             self._cancel_disconnect()

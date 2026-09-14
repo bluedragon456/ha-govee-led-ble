@@ -77,6 +77,8 @@ async def async_get_config_entry_diagnostics(
         "supports_segments": coordinator.profile.supports_segments,
         "segment_count": coordinator.profile.segment_count,
         "connected": bool(client and client.is_connected),
+        "encryption": encryption.diagnostics() if (encryption := getattr(coordinator, "_encryption", None)) else None,
+        "advertised_encryption": getattr(coordinator, "_advertised_encryption", False),
         "available": coordinator.available,
         "fw_version": coordinator.fw_version,
         "hw_version": coordinator.hw_version,

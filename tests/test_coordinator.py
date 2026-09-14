@@ -170,6 +170,7 @@ def test_h6199_retains_default_idle_release_and_polling(h6199):
 
 
 def _c(**kw):
+    kw.setdefault("disconnect", AsyncMock())
     return MagicMock(is_connected=True, **kw)
 
 
