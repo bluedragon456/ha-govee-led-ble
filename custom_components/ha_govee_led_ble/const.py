@@ -62,6 +62,8 @@ class ReadDomain(StrEnum):
     DISPLAY_SETTING = "display_setting"
     RELATIVE_BRIGHTNESS = "relative_brightness"
     SEGMENTS = "segments"
+    INSTALLATION_DIRECTION = "installation_direction"
+    CAMERA_HEALTH = "camera_health"
     OTHER = "other"
 
 
@@ -112,6 +114,7 @@ class ModelProfile:
     read_domains: frozenset[ReadDomain] = frozenset()
     setup_required_read_domains: frozenset[ReadDomain] = frozenset()
     supports_rgb: bool = False
+    supports_installation_direction: bool = False
     supports_color_temperature: bool = False
     min_color_temp_kelvin: int = 2000
     max_color_temp_kelvin: int = 9000
@@ -182,6 +185,8 @@ class ModelProfile:
                 ReadDomain.FIRMWARE,
                 ReadDomain.HARDWARE,
                 ReadDomain.SEGMENTS,
+                ReadDomain.INSTALLATION_DIRECTION,
+                ReadDomain.CAMERA_HEALTH,
             }
             and self.command_grammar is None
         ):
@@ -355,9 +360,12 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
                 ReadDomain.SUBORDINATE_21,
                 ReadDomain.RELATIVE_BRIGHTNESS,
                 ReadDomain.SEGMENTS,
+                ReadDomain.INSTALLATION_DIRECTION,
+                ReadDomain.CAMERA_HEALTH,
             }
         ),
         setup_required_read_domains=frozenset({ReadDomain.POWER, ReadDomain.BRIGHTNESS, ReadDomain.COLOUR_MODE}),
+        supports_installation_direction=True,
         supports_rgb=True,
         supports_color_temperature=True,
         static_readback_kelvin=True,

@@ -206,9 +206,11 @@ async def test_border_reconnect_guard_prevents_optimistic_state(device):
 async def test_ic_reset_precedes_reconnect_await(hass, monkeypatch):
     device = GoveeBLECoordinator(hass, "11:22:33:44:55:66", "H6099", configuration_url="test")
     device.profile = replace(device.profile, physical_ic_count=60)
+    device.installation_direction, device.camera_health = 4, "healthy"
 
     async def connect(*args, **kwargs):
         assert device.profile.physical_ic_count is None
+        assert device.installation_direction is None and device.camera_health == "unknown"
         raise BleakError("offline")
 
     monkeypatch.setattr(f"{M}.async_establish_ble_connection", connect)

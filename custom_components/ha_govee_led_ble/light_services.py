@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import voluptuous as vol
 from homeassistant.components.light import ColorMode  # type: ignore[attr-defined]
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import service
@@ -17,6 +17,11 @@ from .const import DOMAIN
 from .control_arbiter import ControlIntent, async_control_intent
 from .coordinator import GoveeBLECoordinator
 from .generated_protocol_adapter import build_power, build_video_mode
+from .h6099_controls import (
+    async_read_installation_controls,
+    async_set_installation_direction,
+    installation_direction_value,
+)
 from .light_commands import SegmentColorGroup, build_segment_brightness, build_segment_paint, segments_to_mask
 from .native_profile_controls import _send_video_setting, apply_active_video_mode
 from .video_applicability import require_video_controls, video_control_states
@@ -61,6 +66,23 @@ _SET_SEGMENT_BRIGHTNESS_SCHEMA: VolDictType = {
 
 def async_register_light_services(hass: HomeAssistant) -> None:
     """Register light entity services before config entries are loaded."""
+    service.async_register_platform_entity_service(
+        hass,
+        DOMAIN,
+        "set_installation_direction",
+        entity_domain=Platform.LIGHT,
+        func=async_set_installation_direction,
+        schema={vol.Required("value"): installation_direction_value},
+    )
+    service.async_register_platform_entity_service(
+        hass,
+        DOMAIN,
+        "read_installation_controls",
+        entity_domain=Platform.LIGHT,
+        func=async_read_installation_controls,
+        schema={},
+        supports_response=SupportsResponse.ONLY,
+    )
     for name, schema, method in (
         ("paint_segments", _PAINT_SEGMENTS_SCHEMA, "async_paint_segments"),
         ("set_segment_color", _SET_SEGMENT_COLOR_SCHEMA, "async_set_segment_color"),

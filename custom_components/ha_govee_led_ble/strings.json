@@ -51,6 +51,9 @@
     "device_command_failed": {
       "message": "The device command failed."
     },
+    "invalid_control_request": {
+      "message": "The requested control settings are invalid or unsupported."
+    },
     "invalid_custom_effect": {
       "message": "The saved effect is invalid or unavailable."
     },

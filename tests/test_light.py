@@ -1556,6 +1556,8 @@ def test_registers_light_services_during_integration_setup():
         "paint_segments",
         "set_segment_brightness",
         "set_segment_color",
+        "set_installation_direction",
+        "read_installation_controls",
     }
 
 

@@ -57,6 +57,7 @@ from .generated_protocol_adapter import (
 )
 from .govee_encryption import GoveeCryptoError
 from .govee_encryption.session import GoveeEncryptionSession
+from .h6099_controls import h6099_control_queries, h6099_control_status
 from .h6199_calibration import WHITE_BALANCE_RESET
 from .light_commands import (
     SegmentColorGroup,
@@ -126,6 +127,7 @@ _COLOR_EXPECTATION_FIELDS = frozenset(
         *_COLOR_MODE_FIELDS,
     )
 )
+_OPTIONAL_CONTROL_DOMAINS = frozenset({ReadDomain.INSTALLATION_DIRECTION, ReadDomain.CAMERA_HEALTH})
 
 
 class GoveeBLECoordinator(_ActiveModeMixin):
@@ -187,6 +189,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         self.hw_version: str | None = None
         self.subordinate_20_version: str | None = None
         self.subordinate_21_version: str | None = None
+        self.installation_direction: int | None = None
+        self.camera_health = "unknown"
         self.music_mode = "off"
         self.video_mode = "off"
         self.diy_code: int | None = None
@@ -742,6 +746,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         # Invalidate authorization before reconnect can yield; unrelated display identity stays cached.
         for condition in self.profile.video_firmware_conditions:
             setattr(self, condition.identity_field, None)
+        self.installation_direction, self.camera_health = None, "unknown"
         if self.profile.command_grammar == "H6099":
             self.profile = replace(self.profile, physical_ic_count=None)
         if self._client and self._client.is_connected:
@@ -835,6 +840,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         self._notify_started_monotonic = None
         self._last_rx_monotonic = None
         self._expected_state.clear()
+        self.installation_direction, self.camera_health = None, "unknown"
         if self.profile.command_grammar == "H6099":
             self.profile = replace(self.profile, physical_ic_count=None)
         self._stop_keep_alive()
@@ -1296,6 +1302,13 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 self.subordinate_20_version = generated.body.text or None
             elif domain is StatusDomain.SUBORDINATE_21:
                 self.subordinate_21_version = generated.body.text or None
+            elif domain in _OPTIONAL_CONTROL_DOMAINS:
+                control_values = h6099_control_status(decoded, self.profile)
+                if not control_values:
+                    return
+                for field, control_value in control_values.items():
+                    setattr(self, field, control_value)
+                observed = tuple(control_values)
             elif (count := parse_physical_ic_count(generated)) is not None:
                 self.profile = replace(self.profile, physical_ic_count=count)
                 for variant in self.profile.music_variants:
@@ -1420,6 +1433,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 queries.extend(
                     build_segment_query(group, self.model) for group in range(1, self._segment_group_count + 1)
                 )
+            queries.extend(h6099_control_queries(self.model, self.profile))
             for query in queries:
                 await self._async_write_packet(client, query)
             return True
@@ -1692,6 +1706,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             )
             if enabled and self.profile.can_read(domain)
         }
+        if required_domains is not None:
+            queried_domains.update(required_domains & self.profile.read_domains & _OPTIONAL_CONTROL_DOMAINS)
         awaited_domains = queried_domains if required_domains is None else queried_domains & required_domains
         initial_domain_baselines = {domain: self._domain_revisions.get(domain, 0) for domain in awaited_domains}
         current_intent = self._control_arbiter.current_task_intent
@@ -1770,6 +1786,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             if any(
                 self._domain_revisions.get(domain, 0) <= baseline
                 for domain, baseline in initial_domain_baselines.items()
+                if domain not in _OPTIONAL_CONTROL_DOMAINS
             ):
                 await self._disconnect_if_current_locked(client)
             return False

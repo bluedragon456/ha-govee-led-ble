@@ -32,6 +32,8 @@ _STATUS_DOMAIN_NAMES = {
     "display_setting": StatusDomain.DISPLAY_SETTING,
     "relative_brightness": StatusDomain.RELATIVE_BRIGHTNESS,
     "segments": StatusDomain.SEGMENTS,
+    "installation_direction": StatusDomain.INSTALLATION_DIRECTION,
+    "camera_health": StatusDomain.CAMERA_HEALTH,
 }
 
 

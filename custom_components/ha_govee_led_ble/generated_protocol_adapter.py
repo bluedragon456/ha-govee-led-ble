@@ -379,6 +379,37 @@ def build_physical_ic_count_query(model: str) -> bytes:
     return _build_status_query("physical_ic_count", "H6099")
 
 
+INSTALLATION_DIRECTIONS = (2, 3, 4, 5)
+
+
+def build_installation_direction(value: int, model: str) -> bytes:
+    profile = get_profile(model)
+    if not profile.supports_installation_direction or profile.command_grammar != "H6099":
+        raise ValueError(f"{model} has no qualified installation-direction writer")
+    if type(value) is not int or value not in INSTALLATION_DIRECTIONS:
+        raise ValueError("Installation direction must be 2, 3, 4, or 5")
+    root = H6099CommandWrite()
+    root.header = b"\x33"
+    root.opcode = H6099CommandWrite.CommandOp.installation_direction
+    root.body = _child(H6099CommandWrite.InstallationDirectionBody, root)
+    root.body.value = value
+    return _serialize_xor(root)
+
+
+def build_installation_direction_query(model: str) -> bytes:
+    profile = get_profile(model)
+    if not profile.can_read(ReadDomain.INSTALLATION_DIRECTION) or profile.command_grammar != "H6099":
+        raise ValueError(f"{model} has no qualified installation-direction query")
+    return _build_status_query("installation_direction", profile.command_grammar)
+
+
+def build_camera_health_query(model: str) -> bytes:
+    profile = get_profile(model)
+    if not profile.can_read(ReadDomain.CAMERA_HEALTH) or profile.command_grammar != "H6099":
+        raise ValueError(f"{model} has no qualified camera-health query")
+    return _build_status_query("camera_health", profile.command_grammar)
+
+
 def parse_physical_ic_count(generated: Any) -> int | None:
     if getattr(generated.domain, "name", None) != "physical_ic_count":
         return None

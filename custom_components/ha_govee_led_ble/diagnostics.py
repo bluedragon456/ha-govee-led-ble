@@ -118,6 +118,8 @@ async def async_get_config_entry_diagnostics(
         },
         "blank_screen": coordinator.blank_screen,
         "black_border": coordinator.black_border,
+        "installation_direction": coordinator.installation_direction,
+        "camera_health": coordinator.camera_health,
         "blank_screen_policy": {
             "detection": coordinator.blank_screen_detection,
             "low_brightness_duration_seconds": coordinator.blank_screen_low_brightness_duration_seconds,
