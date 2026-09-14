@@ -21,6 +21,7 @@ import {
 } from "../../src/effect-editor-model";
 import { blankAdvancedContent } from "../../src/advanced-effect-model";
 import { cloneBuiltInDefaultBaselines } from "../../src/built-in-default-state";
+import { decodeDevices } from "../../src/validation";
 import type {
   CustomEffectCatalogue,
   CatalogueTemplateDefaultDetail,
@@ -80,6 +81,38 @@ function device(
   };
 }
 
+test("device music geometry replaces catalogue defaults without leaking across devices", () => {
+  const model = new PanelModel(() => undefined);
+  installH6199Catalogue(model);
+  const catalogue = model.customCatalogue!.models.H6199;
+  model.customCatalogue!.models.H6099 = { ...catalogue, sku: "H6099", painted_addressing: "physical_ic" };
+  const settings = {
+    piano_keys: {
+      available: true, style: false, calm_default: false, colour: false, evidence: "APK", palette_size: 7,
+      parameters: { key_count: { kind: "number", default: 18, min: 9, max: 36, options: [] } },
+    },
+    hopping: {
+      available: true, style: false, calm_default: false, colour: false, evidence: "APK", palette_size: 7,
+      parameters: { background: { kind: "number", default: 0x010101, min: 0, max: 0xffffff, options: [] } },
+    },
+  };
+  model.devices = decodeDevices([
+    { ...device("known", "H6099"), physical_ic_count: 60, music_settings: settings },
+    { ...device("unknown", "H6099"), physical_ic_count: null, music_settings: {} },
+  ]);
+  model.selectedDeviceId = "known";
+  expect(model.modelCatalogue?.physical_ic_count).toBe(60);
+  expect(model.modelCatalogue?.music_settings.piano_keys.parameters.key_count.max).toBe(36);
+  model.selectedDeviceId = "unknown";
+  expect(model.modelCatalogue?.physical_ic_count).toBeUndefined();
+  expect(model.modelCatalogue?.music_settings).toEqual({});
+  expect(model.customCatalogue!.models.H6099.music_settings).toBe(catalogue.music_settings);
+  for (const count of [0, 32768]) {
+    expect(() => decodeDevices([{ ...device("invalid", "H6099"), physical_ic_count: count }])).toThrow();
+  }
+  expect(() => decodeDevices([{ ...device("large", "H6099"), physical_ic_count: 32767 }])).not.toThrow();
+});
+
 test("live video conditions reject requested settings without stripping persisted content", () => {
   const model = new PanelModel(() => undefined);
   const target = device("video", "H6199");
@@ -115,6 +148,50 @@ function painted(): PaintedContent {
     ],
   };
 }
+
+test("unknown border firmware blocks only profiles requesting border removal", () => {
+  const model = new PanelModel(() => undefined);
+  const target = device("video", "H6099");
+  target.profiles.video = "supported";
+  target.video_control_states = {black_border: "evidence_gap"};
+  model.devices = [target];
+  model.selectedDeviceId = "video";
+  model.content = videoProfile("H6099", "movie");
+  expect(model.previewCapability).toBe("supported");
+  model.content = {...model.content, black_border: false};
+  expect(model.previewCapability).toBe("evidence_gap");
+  target.video_control_states.black_border = "unsupported";
+  expect(model.previewCapability).toBe("unsupported");
+  target.video_control_states.black_border = "supported";
+  expect(model.previewCapability).toBe("supported");
+  target.video_control_states.black_border = "evidence_gap";
+  delete model.content.black_border;
+  expect(model.previewCapability).toBe("supported");
+});
+
+test("video saturation eligibility uses the target catalogue minimum", () => {
+  const model = new PanelModel(() => undefined);
+  const target = device("video", "H6199");
+  installH6199Catalogue(model);
+  target.profiles.video = "supported";
+  model.devices = [target];
+  model.selectedDeviceId = "video";
+  model.content = {...videoProfile("H6199", "movie"), saturation: 0};
+  expect(model.previewCapability).toBe("supported");
+  const catalogue = model.modelCatalogue;
+  if (!catalogue) throw new Error("Missing video catalogue");
+  const controls = catalogue.video_controls = {
+    saturation_min: 0,
+    white_balance: {representation: "position", minimum: 1, maximum: 20, default: 17},
+    brightness_zones: ["left", "top", "right", "bottom"],
+  };
+  controls.saturation_min = 1;
+  expect(model.previewCapability).toBe("unsupported");
+  model.content.saturation = 1;
+  expect(model.previewCapability).toBe("supported");
+  model.content.saturation = null;
+  expect(model.previewCapability).toBe("supported");
+});
 
 function videoProfile(
   model: ModelSku,

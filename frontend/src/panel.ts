@@ -1243,13 +1243,21 @@ export class GoveeLedEffectStudio extends LitElement {
     if (this.content.kind !== "h617a_painted") {
       return nothing;
     }
+    const content = this.content;
+    const physical = content.addressing === "physical_ic";
     return html`
       ${this.renderEditorHeading()}
 
       ${this.renderSingleEffectSelector()}
 
+      ${physical && !this.model.selectedDevice?.physical_ic_count ? html`
+        <p role="status">Graffiti requires the device's physical IC count. Refresh the device before painting or applying.</p>
+      ` : nothing}
+
       <govee-painted-segment-editor
         .segments=${this.content.segments}
+        .background=${content.background ?? [0, 0, 0]}
+        .physical=${physical}
         .disabled=${this.editorDisabled}
         @segment-selected=${(
           event: CustomEvent<{
@@ -1289,7 +1297,7 @@ export class GoveeLedEffectStudio extends LitElement {
               @click=${() => this.editor.selectPaintOff()}
             >
               <span class="paint-off-swatch" aria-hidden="true"></span>
-              Off
+              ${physical ? "Background" : "Off"}
             </button>
           </div>
         </section>
@@ -1297,6 +1305,17 @@ export class GoveeLedEffectStudio extends LitElement {
         <section class="card">
           <div class="parameter-stack">
             ${this.renderPaintedVariationField()}
+            ${physical ? html`
+              <govee-single-colour-field
+                label="Background colour"
+                .colour=${content.background ?? [255, 255, 255]}
+                .disabled=${this.editorDisabled}
+                @colour-changing=${(event: CustomEvent<{ colour: RGB }>) =>
+                  this.editor.updatePaintedContent({ background: event.detail.colour }, "changing")}
+                @colour-changed=${(event: CustomEvent<{ colour: RGB }>) =>
+                  this.editor.updatePaintedContent({ background: event.detail.colour }, "committed")}
+              ></govee-single-colour-field>
+            ` : nothing}
             ${this.sliderField("Speed", "speed", this.content.speed)}
             ${this.sliderField(
               "Brightness",

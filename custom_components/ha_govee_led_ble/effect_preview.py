@@ -17,7 +17,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant
 
-from .const import DOMAIN, ReadDomain
+from .const import DOMAIN, ModelProfile, ReadDomain
 from .control_arbiter import ControlIntent, PreviewAdmission, async_control_intent
 from .coordinator_status import ParsedMode
 from .effect_active_workspace import ActiveEffectWorkspace, ActiveEffectWorkspaceRepository
@@ -29,6 +29,7 @@ from .effect_compiler import (
     CompiledEffect,
     CompiledVideoProfile,
     compile_application,
+    validate_compiled_geometry,
 )
 from .effect_contracts import CapabilityWorkflow, require_effect_route
 from .effect_deployments import ObservationConfidence
@@ -486,7 +487,7 @@ class EffectPreviewManager:
         coordinator = self._loaded_coordinator(config_entry_id)
         try:
             diy_code = resolve_diy_code(item, model=coordinator.model)
-            compiled = compile_application(item, coordinator.model, diy_code=diy_code)
+            compiled = compile_application(item, coordinator.model, diy_code=diy_code, profile=coordinator.profile)
         except ValueError as exc:
             raise PreviewError(str(exc)) from exc
         validate_video_request(coordinator, item.content)
@@ -501,6 +502,7 @@ class EffectPreviewManager:
                 coordinator.model,
                 item.origin.source_id,
                 item.content,
+                profile=coordinator.profile,
             )
         fingerprint = _snapshot_fingerprint(coordinator.model, item)
         request = _PreviewRequest(
@@ -516,7 +518,11 @@ class EffectPreviewManager:
             item=item,
             diy_code=diy_code,
             compiled=compiled,
-            default_action=(_snapshot_default_action(item, coordinator.model) if persist_default else None),
+            default_action=(
+                _snapshot_default_action(item, coordinator.model, profile=coordinator.profile)
+                if persist_default
+                else None
+            ),
         )
         return await self._async_accept(owner, request)
 
@@ -929,6 +935,8 @@ class EffectPreviewManager:
         writer: _PreviewWriter | None = None
         try:
             await coordinator.async_preview_preflight(timeout=self._connect_timeout)
+            if compiled is not None:
+                validate_compiled_geometry(compiled, coordinator.profile)
             writer = _PreviewWriter(self, request, coordinator)
             if request.scene is not None:
                 await coordinator.async_apply_native_scene(
@@ -951,6 +959,7 @@ class EffectPreviewManager:
                         packets,
                         intent=ControlIntent.PREVIEW,
                         before_write=writer.begin,
+                        write_guard=lambda: validate_compiled_geometry(compiled, coordinator.profile),
                     )
                     if power_required:
                         coordinator.is_on = True
@@ -1165,6 +1174,7 @@ class EffectPreviewManager:
                 self._loaded_coordinator(request.config_entry_id).model,
                 template_id,
                 item.content,
+                profile=self._loaded_coordinator(request.config_entry_id).profile,
             )
             if effect_content_hash(item.content) == effect_content_hash(template.content):
                 await self._template_defaults.async_delete(request.config_entry_id, template_id)
@@ -1649,7 +1659,7 @@ def _scene_default_action(
     return "reset" if canonical_body == catalogue_body and speed_index == catalogue_speed else "set"
 
 
-def _snapshot_default_action(item: LibraryItem, model: str) -> str | None:
+def _snapshot_default_action(item: LibraryItem, model: str, *, profile: ModelProfile | None = None) -> str | None:
     if isinstance(item.content, PaletteScene | LayeredScene):
         scene = resolve_scene(
             item.content.template.sku,
@@ -1671,6 +1681,7 @@ def _snapshot_default_action(item: LibraryItem, model: str) -> str | None:
         model,
         item.origin.source_id,
         item.content,
+        profile=profile,
     )
     return "reset" if effect_content_hash(item.content) == effect_content_hash(template.content) else "set"
 

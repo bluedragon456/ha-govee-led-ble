@@ -103,12 +103,15 @@ def _coordinator(*, model: str = "H617A", readable: bool = False) -> SimpleNames
         before_write=None,
         attempt_started=None,
         progress=None,
+        write_guard=None,
     ) -> None:
         if attempt_started is not None:
             await attempt_started(1)
         if before_write is not None:
             await before_write()
         for index, packet in enumerate(packets, start=1):
+            if write_guard is not None:
+                write_guard()
             await coordinator.async_preview_write(packet)
             if progress is not None:
                 await progress(index)
@@ -203,9 +206,9 @@ async def test_worker_preflights_all_but_writes_only_newest_pending_request(
 
     original_compile = effect_preview.compile_application
 
-    def compile_recording(item, model, *, diy_code=None):
+    def compile_recording(item, model, *, diy_code=None, profile=None):
         compiled_names.append(item.name)
-        return original_compile(item, model, diy_code=diy_code)
+        return original_compile(item, model, diy_code=diy_code, profile=profile)
 
     monkeypatch.setattr(effect_preview, "compile_application", compile_recording)
 
@@ -272,9 +275,9 @@ async def test_newest_request_can_return_to_the_active_state(
 
     original_compile = effect_preview.compile_application
 
-    def compile_recording(item, model, *, diy_code=None):
+    def compile_recording(item, model, *, diy_code=None, profile=None):
         compiled_names.append(item.name)
-        return original_compile(item, model, diy_code=diy_code)
+        return original_compile(item, model, diy_code=diy_code, profile=profile)
 
     monkeypatch.setattr(effect_preview, "compile_application", compile_recording)
 
@@ -1163,6 +1166,15 @@ async def test_snapshot_profile_previews_use_preview_transport(
     coordinator.blank_screen_low_brightness_duration_seconds = 10
     coordinator.blank_screen_same_tone_duration_seconds = 120
     coordinator._client = MagicMock(is_connected=True, write_gatt_char=AsyncMock())
+    if model == "H6199":
+        from tests.test_h6099 import frame
+
+        async def fresh_policy(**kwargs):
+            assert kwargs == {"refresh_display_settings": frozenset({"blank_screen"})}
+            coordinator._notify_callback(None, bytearray(frame("aaa90a0600020a007800")))
+            return True
+
+        monkeypatch.setattr(coordinator, "refresh_state", fresh_policy)
     coordinator.async_preview_preflight = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_preview_write = AsyncMock(wraps=coordinator.async_preview_write)  # type: ignore[method-assign]
     coordinator.async_observe_effect = AsyncMock(return_value=True)  # type: ignore[method-assign]
@@ -1570,6 +1582,60 @@ async def test_scene_preview_validation_errors(
             speed_index=speed_scene.speed.option_count,
         )
     await manager.async_shutdown()
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+async def test_toggle_only_live_preview_uses_fresh_external_policy(hass, monkeypatch, fresh):
+    from custom_components.ha_govee_led_ble.generated_protocol_adapter import build_blank_screen_query
+    from tests.test_h6099 import frame
+
+    coordinator = GoveeBLECoordinator(hass, "AA:BB:CC:DD:EE:FF", "H6099", configuration_url="test")
+    coordinator._notify_callback(None, bytearray(frame("aaa90a0600020a007800")))
+    coordinator.is_on = True
+    client = MagicMock(is_connected=True, write_gatt_char=AsyncMock(), disconnect=AsyncMock())
+    coordinator._client = client
+    monkeypatch.setattr(coordinator, "_ensure_connected", AsyncMock(return_value=client))
+    monkeypatch.setattr(coordinator, "_renew_foreground_lease", lambda: None)
+    refresh = coordinator.refresh_state
+
+    async def immediate_refresh(**kwargs):
+        return await refresh(**kwargs, timeout=0)
+
+    monkeypatch.setattr(coordinator, "refresh_state", immediate_refresh)
+
+    async def reconnect(**kwargs):
+        coordinator._clear_client_state(client)
+        coordinator._client = client
+
+    monkeypatch.setattr(coordinator, "async_preview_preflight", reconnect)
+    monkeypatch.setattr(coordinator, "async_observe_effect", AsyncMock(return_value=True))
+
+    async def transmit(_uuid, packet, **kwargs):
+        if packet == build_blank_screen_query("H6099") and fresh:
+            coordinator._notify_callback(None, bytearray(frame("aaa90a0600011e00f000")))
+
+    client.write_gatt_char.side_effect = transmit
+    manager, _cache = await _manager(hass, monkeypatch, coordinator)
+    owner, events = object(), []
+    session_id = _open(manager, owner, events)
+    try:
+        await manager.async_queue_snapshot(
+            session_id=session_id,
+            owner=owner,
+            config_entry_id="entry-a",
+            sequence=1,
+            updated_at="2026-09-15T00:00:00Z",
+            item=LibraryItem.new("Toggle", VideoProfile("H6099", "movie", True, 70, False, 40, None, None, True)),
+        )
+        await asyncio.wait_for(manager.async_wait_idle("entry-a"), 1)
+        writes = [call.args[1] for call in client.write_gatt_char.await_args_list]
+        assert build_blank_screen_query("H6099") in writes
+        blank_writes = [packet for packet in writes if packet[:3] == bytes.fromhex("33a90a")]
+        assert blank_writes == ([build_blank_screen(True, "H6099", 1, 30, 240)] if fresh else [])
+        assert any(event.phase is (PreviewPhase.WRITTEN if fresh else PreviewPhase.FAILED) for event in events)
+        assert not coordinator._lock.locked() and not coordinator._control_lock.locked()
+    finally:
+        await manager.async_shutdown()
 
 
 async def test_preview_acceptance_rejects_stale_unloading_and_incompatible_requests(

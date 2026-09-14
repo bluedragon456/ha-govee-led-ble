@@ -1,8 +1,8 @@
 """Active-mode derivation and mode-switching for the Govee BLE coordinator."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .const import MUSIC_MODE_SLUGS
 from .control_arbiter import ControlIntent, async_control_intent
@@ -15,8 +15,9 @@ from .light_commands import (
     build_color_temp,
     build_white_brightness,
 )
-from .music_commands import build_music_params, prepare_music_request
+from .music_commands import build_music_params, prepare_music_profile_writes
 from .music_semantics import music_params_for_mode, music_variant
+from .native_profile_controls import ProfileWriter
 from .native_scenes import build_native_scene_packets
 from .scenes import MODEL_SCENES, SceneEntry, canonical_scene_key
 
@@ -48,6 +49,14 @@ class _ActiveModeMixin(_CoordinatorBase):
     music_daynight_gradient: bool
     _scene_code: int | None
     _music_calm: bool | None = None
+    _music_palette: tuple[str, tuple[tuple[int, int, int], ...]] | None = None
+
+    @property
+    def music_palette(self) -> tuple[tuple[int, int, int], ...] | None:
+        """Retained upload for the active selector; unknown is never a default palette."""
+        if self._music_palette is not None and self._music_palette[0] == self.music_mode:
+            return self._music_palette[1]
+        return None
 
     @property
     def music_calm(self) -> bool:
@@ -195,7 +204,8 @@ class _ActiveModeMixin(_CoordinatorBase):
         slug: str,
         *,
         include_parameters: bool = True,
-        writer: Callable[[bytes], Awaitable[None]] | None = None,
+        writer: ProfileWriter | None = None,
+        palette: tuple[tuple[int, int, int], ...] | None = None,
     ) -> None:
         if slug == "off":
             await self.async_restore_pre_mode()
@@ -209,33 +219,75 @@ class _ActiveModeMixin(_CoordinatorBase):
             if variant is not None and variant.supports_style
             else False
         )
-        color = self.music_color if self.profile.supports_music_color else None
+        color = (
+            self.music_color
+            if self.profile.supports_music_color and (variant is None or variant.supports_fixed_colour)
+            else None
+        )
         # Native selection historically sends only style companions; authored profiles
         # and recovery explicitly request all parameter packets.
-        packets = prepare_music_request(
+        writes = prepare_music_profile_writes(
             self.model,
             slug,
             self.music_sensitivity,
             color,
             calm,
             {},
-            include_parameters=include_parameters and variant is not None and variant.supports_style,
+            include_parameters=include_parameters
+            and (
+                palette is not None
+                or self.profile.music_upload_before_selector
+                or bool(variant and variant.supports_style)
+            ),
+            profile=self.profile,
+            palette=palette,
         )
-        if self.active_mode == "colour":
-            self._pre_mode_snapshot = self._capture_static_state()
-        send = self.send_command if writer is None else writer
-        for packet in packets:
-            await send(packet)
-        self.is_on = True
-        self.music_mode, self.video_mode = slug, "off"
-        self.effect = None
-        self.diy_code = None
+        await self.async_write_music_sequence(
+            writes,
+            mode_code=mode_id,
+            physical_ic_count=self.profile.physical_ic_count,
+            intent=ControlIntent.USER,
+            writer=writer,
+        )
+
+    async def async_write_music_sequence(
+        self,
+        writes: Sequence[tuple[bytes, Mapping[str, Any]]],
+        *,
+        mode_code: int,
+        physical_ic_count: int | None,
+        intent: ControlIntent,
+        writer: ProfileWriter | None = None,
+    ) -> None:
+        variant = music_variant(self.profile, mode_code)
+
+        def guard(index: int) -> None:
+            if variant and variant.requires_physical_ic_count and physical_ic_count != self.profile.physical_ic_count:
+                raise ValueError("Physical IC count changed since preparation; refresh and retry")
+            if "music_mode" in writes[index][1] and self.active_mode == "colour":
+                self._pre_mode_snapshot = self._capture_static_state()
+
+        if writer is None:
+            await self.async_write_effect_sequence(
+                tuple(packet for packet, _ in writes),
+                intent=intent,
+                packet_state_values=tuple(state for _, state in writes),
+                packet_write_guard=guard,
+            )
+            return
+        # Connection-bound preview writers fail closed; they never retry a fragment.
+        for index, (packet, state_values) in enumerate(writes):
+
+            def check(index: int = index) -> None:
+                guard(index)
+
+            await writer(packet, state_values=state_values, write_guard=check)
 
     async def async_apply_music_params(
         self,
         mode_code: int,
         *,
-        writer: Callable[[bytes], Awaitable[None]] | None = None,
+        writer: ProfileWriter | None = None,
     ) -> None:
         await self._send_music_params(mode_code, writer=writer)
 
@@ -243,15 +295,43 @@ class _ActiveModeMixin(_CoordinatorBase):
         self,
         mode_code: int,
         *,
-        writer: Callable[[bytes], Awaitable[None]] | None = None,
+        writer: ProfileWriter | None = None,
     ) -> None:
         parameters = {
-            spec.profile_key: getattr(self, spec.key) for spec in music_params_for_mode(mode_code, self.profile)
+            spec.profile_key: getattr(self, spec.key, spec.default)
+            for spec in music_params_for_mode(mode_code, self.profile)
         }
+        variant = music_variant(self.profile, mode_code)
+        if variant and variant.palette_bounds:
+            if MUSIC_MODE_SLUGS.get(self.music_mode) != mode_code or self.music_palette is None:
+                raise ValueError("Cannot preserve unknown music palette; select or apply a complete profile")
+            writes = prepare_music_profile_writes(
+                self.model,
+                self.music_mode,
+                self.music_sensitivity,
+                None,
+                self.music_calm,
+                parameters,
+                profile=self.profile,
+                palette=self.music_palette,
+            )
+            await self.async_write_music_sequence(
+                writes[1:-1] if self.profile.music_upload_before_selector else writes[2:],
+                mode_code=mode_code,
+                physical_ic_count=self.profile.physical_ic_count,
+                intent=ControlIntent.USER,
+                writer=writer,
+            )
+            return
         packets = build_music_params(mode_code, parameters, profile=self.profile, calm=self.music_calm)
-        send = self.send_command if writer is None else writer
-        for packet in packets:
-            await send(packet)
+        if packets:
+            await self.async_write_music_sequence(
+                tuple((packet, {}) for packet in packets),
+                mode_code=mode_code,
+                physical_ic_count=self.profile.physical_ic_count,
+                intent=ControlIntent.USER,
+                writer=writer,
+            )
 
     async def async_restore_pre_mode(self) -> None:
         snap = self._pre_mode_snapshot

@@ -193,10 +193,7 @@ async def test_music_apply_partial_failure_installs_only_attempted_packet_state(
         physical.side_effect = transmit
         with pytest.raises(BleakError, match="write failed"):
             await async_apply_compiled_profile(coordinator, compiled)
-        assert [call.args[1] for call in physical.await_args_list] == [
-            *packets[:failed_index],
-            *([packets[failed_index]] * 3),
-        ]
+        assert [call.args[1] for call in physical.await_args_list] == list(packets[: failed_index + 1]) * 3
     for key in (
         "is_on",
         "music_mode",
@@ -212,7 +209,7 @@ async def test_music_apply_partial_failure_installs_only_attempted_packet_state(
         "rgb_color",
     ):
         assert getattr(coordinator, key) == attempted_state.get(key, getattr(before, key)), key
-    assert coordinator.control_write_attempts == failed_index + 3
+    assert coordinator.control_write_attempts == (failed_index + 1) * 3
     assert coordinator._field_revisions == coordinator._domain_revisions == {}
     assert coordinator._pre_mode_snapshot is snapshot
     assert "music_hopping_brightness" not in coordinator._expected_state
@@ -265,23 +262,15 @@ async def test_music_static_snapshot_is_captured_at_selector_attempt(hass, fail_
     snapshot = coordinator._pre_mode_snapshot
     compiled = compile_music_profile(LibraryItem.new("Music", MusicProfile("H617A", "separation", 50)), "H617A")
     packets = prepare_music_request("H617A", "separation", 50, None, False, compiled.parameters)
-    connections = 0
-
-    async def connect():
-        nonlocal connections
-        connections += 1
-        if connections == 2:
-            assert coordinator._pre_mode_snapshot is snapshot
-            for group in range(1, 6):
-                _notify(coordinator, bytes([0xAA, 0xA5, group, *([100, 10, 20, 30] * 3)]))
-            assert coordinator.rgb_color == (10, 20, 30)
-        return coordinator._client
 
     async def transmit(_uuid, packet, *, response):
         if packet == packets[0]:
             assert coordinator._pre_mode_snapshot is snapshot
             if fail_at == "power":
                 raise RuntimeError("power failed")
+            for group in range(1, 6):
+                _notify(coordinator, bytes([0xAA, 0xA5, group, *([100, 10, 20, 30] * 3)]))
+            assert coordinator.rgb_color == (10, 20, 30)
         if packet == packets[1]:
             assert coordinator._pre_mode_snapshot.rgb == (10, 20, 30)
             assert coordinator.music_mode == "separation"
@@ -289,7 +278,6 @@ async def test_music_static_snapshot_is_captured_at_selector_attempt(hass, fail_
                 raise RuntimeError("selector failed")
 
     with _music_transport(coordinator) as physical:
-        coordinator._ensure_connected.side_effect = connect
         physical.side_effect = transmit
         if fail_at:
             with pytest.raises(RuntimeError, match=f"{fail_at} failed"):
@@ -312,8 +300,10 @@ async def test_music_preview_guard_failure_does_not_install_selector_state(hass)
 
     async def writer(packet, *, state_values=None, write_guard=None, expected_values=None):
         def check():
-            if write_guard is not None:
+            if state_values and "music_mode" in state_values:
                 raise ValueError("preview guard rejected selector")
+            if write_guard is not None:
+                write_guard()
 
         await coordinator.async_preview_write(packet, before_write=check, state_values=state_values)
 
@@ -377,11 +367,14 @@ async def test_music_shutdown_no_write_does_not_install_state(hass, operation):
     before = coordinator.capture_effect_control_state()
     snapshot = coordinator._pre_mode_snapshot
     with _music_transport(coordinator) as physical, patch.object(hass, "state", CoreState.stopping):
-        if operation == "apply":
-            await async_apply_compiled_profile(coordinator, compiled)
-        else:
-            state = replace(before, mode="music", is_on=True, music_mode="separation", music_parameters={"point": 4})
-            assert not await coordinator.async_restore_effect_control_state(state, overwritten_diy_code=None)
+        with pytest.raises(RuntimeError, match="Home Assistant is stopping"):
+            if operation == "apply":
+                await async_apply_compiled_profile(coordinator, compiled)
+            else:
+                state = replace(
+                    before, mode="music", is_on=True, music_mode="separation", music_parameters={"point": 4}
+                )
+                await coordinator.async_restore_effect_control_state(state, overwritten_diy_code=None)
         physical.assert_not_awaited()
         coordinator._ensure_connected.assert_not_awaited()
     assert coordinator.capture_effect_control_state() == before
@@ -496,7 +489,7 @@ async def test_invalid_recovery_fails_before_any_write(hass, alternative):
         music_sensitivity=50,
         music_separation_point=1,
     )
-    with patch.object(coordinator, "send_command", new_callable=AsyncMock) as send:
+    with _music_transport(coordinator) as send:
         with pytest.raises(ValueError, match="6 to 12"):
             await coordinator.async_restore_effect_control_state(state, overwritten_diy_code=None)
         send.assert_not_awaited()
@@ -529,7 +522,7 @@ async def test_unknown_semantics_never_write_or_install_state(hass, alternative,
     profile = replace(alternative, music_variants=(variant,))
     monkeypatch.setitem(MODEL_PROFILES, "TEST-MUSIC", profile)
     coordinator = GoveeBLECoordinator(hass, "AA:BB:CC:DD:EE:FF", "TEST-MUSIC", configuration_url="test")
-    with patch.object(coordinator, "send_command", new_callable=AsyncMock) as send:
+    with _music_transport(coordinator) as send:
         before = coordinator.capture_effect_control_state()
         with pytest.raises(ValueError):
             prepare_music_profile_writes(

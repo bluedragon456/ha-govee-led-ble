@@ -6,6 +6,12 @@ govee_common.py
 govee_encryption.py
 govee_segment_page.py
 govee_shared.py
+h6099_command_write.py
+h6099_command_ack.py
+h6099_effect_upload.py
+h6099_music_parameters.py
+h6099_status_query.py
+h6099_status_reply.py
 h6199_command_write.py
 h6199_command_ack.py
 h6199_effect_upload.py

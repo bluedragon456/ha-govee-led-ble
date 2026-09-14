@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from .control_arbiter import ControlIntent
 from .generated_protocol_adapter import (
+    build_black_border,
     build_blank_screen,
     build_power,
     build_relative_brightness,
@@ -59,6 +60,7 @@ async def apply_active_video_mode(
     }
 
     def check_retained() -> None:
+        coordinator.profile.validate_video_saturation(values["saturation"])
         if any(getattr(coordinator, f"video_{field}") != value for field, value in retained.items()):
             raise ValueError("Retained video settings changed before write; refresh and retry")
 
@@ -67,6 +69,7 @@ async def apply_active_video_mode(
         for field in ("full_screen", "saturation", "sound_effects", "sound_effects_softness")
     }
     values["sound_effects"] = values["sound_effects"] and coordinator.profile.supports_video_sound_effects
+    coordinator.profile.validate_video_saturation(values["saturation"])
     packet = build_video_mode(
         mode,
         values["full_screen"],
@@ -212,25 +215,65 @@ async def apply_blank_screen(
     coordinator: GoveeBLECoordinator,
     expected: bool,
     *,
+    policy: tuple[int, int, int] | None = None,
     writer: ProfileWriter | None = None,
     verify: bool = True,
+    write_guard: Callable[[], None] | None = None,
 ) -> bool:
     require_video_controls(coordinator.profile, coordinator, ("blank_screen",))
-    detection = coordinator.blank_screen_detection
-    low_duration = coordinator.blank_screen_low_brightness_duration_seconds
-    same_duration = coordinator.blank_screen_same_tone_duration_seconds
+    if policy is None:
+        baselines = {
+            field: coordinator._field_revisions.get(field, 0)
+            for field in (
+                "blank_screen_detection",
+                "blank_screen_low_brightness_duration_seconds",
+                "blank_screen_same_tone_duration_seconds",
+            )
+        }
+        # Refresh owns its transport lock and inherits the caller's control intent.
+        # Never refresh inside the synchronous physical-write guard.
+        if not await coordinator.refresh_state(refresh_display_settings=frozenset({"blank_screen"})) or any(
+            coordinator._field_revisions.get(field, 0) <= revision for field, revision in baselines.items()
+        ):
+            raise ValueError("Blank-screen policy state has not been read freshly; refresh the device first")
+        policy_revision = coordinator._blank_screen_notification_revision
+        client, token = coordinator._client, coordinator._notification_token
+    detection, low_duration, same_duration = (
+        policy
+        if policy is not None
+        else (
+            coordinator.blank_screen_detection,
+            coordinator.blank_screen_low_brightness_duration_seconds,
+            coordinator.blank_screen_same_tone_duration_seconds,
+        )
+    )
     if detection is None or low_duration is None or same_duration is None:
         raise ValueError("Blank-screen policy state has not been read; refresh the device first")
 
     def check_policy() -> None:
-        if (
-            coordinator.blank_screen_detection,
-            coordinator.blank_screen_low_brightness_duration_seconds,
-            coordinator.blank_screen_same_tone_duration_seconds,
-        ) != (detection, low_duration, same_duration):
+        if write_guard is not None:
+            write_guard()
+        if policy is None and (
+            coordinator._blank_screen_notification_revision != policy_revision
+            or coordinator._client is not client
+            or coordinator._notification_token is not token
+            or (
+                coordinator.blank_screen_detection,
+                coordinator.blank_screen_low_brightness_duration_seconds,
+                coordinator.blank_screen_same_tone_duration_seconds,
+            )
+            != (detection, low_duration, same_duration)
+        ):
             raise ValueError("Blank-screen policy changed before write; refresh and retry")
 
     packet = build_blank_screen(expected, coordinator.model, detection, low_duration, same_duration)
+    fields: dict[str, Any] = {"blank_screen": expected}
+    if policy is not None:
+        fields.update(
+            blank_screen_detection=detection,
+            blank_screen_low_brightness_duration_seconds=low_duration,
+            blank_screen_same_tone_duration_seconds=same_duration,
+        )
     for _ in range(2 if verify else 1):
         await _send_video_setting(
             coordinator,
@@ -238,11 +281,40 @@ async def apply_blank_screen(
             frozenset({"blank_screen"}),
             writer=writer,
             write_guard=check_policy,
-            state_values={"blank_screen": expected},
-            expected_values={"blank_screen": expected} if verify else None,
+            state_values=fields,
+            expected_values=fields if verify else None,
         )
         if not verify:
             return True
-        if await coordinator.refresh_state(expected_blank_screen=expected):
+        confirmed = (
+            await coordinator.refresh_state(expected_blank_screen=expected)
+            if policy is None
+            else await coordinator.refresh_state(expected_blank_screen=expected, expected_blank_screen_policy=policy)
+        )
+        if confirmed:
             return True
     raise RuntimeError("Blank-screen write was not confirmed by the device")
+
+
+async def apply_black_border(
+    coordinator: GoveeBLECoordinator,
+    expected: bool,
+    *,
+    writer: ProfileWriter | None = None,
+    verify: bool = True,
+) -> bool:
+    require_video_controls(coordinator.profile, coordinator, ("black_border",))
+    packet = build_black_border(expected, coordinator.model)
+    fields = {"black_border": expected}
+    for _ in range(2 if verify else 1):
+        await _send_video_setting(
+            coordinator,
+            packet,
+            frozenset({"black_border"}),
+            writer=writer,
+            state_values=fields,
+            expected_values=fields if verify else None,
+        )
+        if not verify or await coordinator.refresh_state(expected_black_border=expected):
+            return True
+    raise RuntimeError("Black-border write was not confirmed by the device")

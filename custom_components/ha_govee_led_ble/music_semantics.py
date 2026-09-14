@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from math import ceil
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -37,6 +38,8 @@ class MusicVariant:
     style_companions: tuple[int, int] | None = None
     piano_derived_half: bool = False
     direction_values: tuple[tuple[str, int, int], ...] = ()
+    palette_bounds: tuple[int, int] | None = None
+    supports_fixed_colour: bool = True
 
 
 # Captured values, not values calculated from logical colour zones or guessed IC counts.
@@ -117,8 +120,117 @@ H617A_MUSIC_VARIANTS = (
 )
 
 
+# Android 7.6.01 pact_h6099/detail/mode/MusicMode and MusicEffect.Companion.a.
+# These are unpadded APK bodies, not H617A capture templates.
+_H6099_PALETTE = "07ff0000ff7f00ffff0000ff000000ff00ffff8b00ff"
+H6099_MUSIC_VARIANTS = (
+    MusicVariant(3, "H6099 MusicMode.d Rhythm legacy selector", supports_style=True),
+    MusicVariant(4, "H6099 MusicMode.d Spectrum legacy selector"),
+    MusicVariant(5, "H6099 SubModeMusicV1 legacy Energetic selector; new-detail upload path unresolved"),
+    MusicVariant(6, "H6099 MusicMode.d Rolling legacy selector"),
+    MusicVariant(
+        0x30,
+        "H6099 MusicMode.d / RgbMusicZhanFang",
+        "h6099_music_parameters",
+        bytes.fromhex("30" + _H6099_PALETTE + "0a50"),
+        supports_style=True,
+        palette_bounds=(1, 8),
+        supports_fixed_colour=False,
+    ),
+    MusicVariant(
+        0x31,
+        "H6099 MusicMode.d / RgbMusicCuiCan",
+        "h6099_music_parameters",
+        bytes.fromhex("31" + _H6099_PALETTE + "05640a"),
+        supports_style=True,
+        palette_bounds=(1, 8),
+        supports_fixed_colour=False,
+    ),
+    MusicVariant(
+        0x32,
+        "H6099 MusicMode.d / FenLi.Builder",
+        "h6099_music_parameters",
+        bytes.fromhex("32" + _H6099_PALETTE + "030061"),
+        (
+            MusicParamSpec("music_separation_point", "point", "point", "number", 3, 1, 5),
+            MusicParamSpec("music_separation_gradient", "gradient", "gradient", "switch", False),
+        ),
+        requires_physical_ic_count=True,
+        palette_bounds=(1, 8),
+        supports_fixed_colour=False,
+    ),
+    MusicVariant(
+        0x33,
+        "H6099 MusicMode.d / RgbicMusicYueDong; ColorUtils.toNoColor = RGB 1,1,1",
+        "h6099_music_parameters",
+        bytes.fromhex("33" + _H6099_PALETTE + "010101196201030000"),
+        (
+            MusicParamSpec("music_hopping_background", "background", "background", "number", 0x010101, 0, 0xFFFFFF),
+            MusicParamSpec("music_hopping_brightness", "relative_brightness", "rel_brightness", "number", 25, 0, 50),
+        ),
+        requires_physical_ic_count=True,
+        palette_bounds=(1, 8),
+        supports_fixed_colour=False,
+    ),
+    MusicVariant(
+        0x34,
+        "H6099 MusicMode.d / RgbicMusicGangQinJian",
+        "h6099_music_parameters",
+        bytes.fromhex("34" + _H6099_PALETTE + "0000000000"),
+        (
+            MusicParamSpec("music_piano_key_count", "key_count", "key_count", "number", 0),
+            MusicParamSpec("music_piano_gradient", "gradient", "gradient", "switch", False),
+        ),
+        requires_physical_ic_count=True,
+        palette_bounds=(1, 8),
+        supports_fixed_colour=False,
+    ),
+    MusicVariant(
+        0x35,
+        "H6099 MusicMode.d / RgbicMusicDuiJi",
+        "h6099_music_parameters",
+        bytes.fromhex("35" + _H6099_PALETTE + "01000000"),
+        (
+            MusicParamSpec(
+                "music_fountain_direction",
+                "direction",
+                "start_point",
+                "select",
+                "two_way",
+                options=("clockwise", "counterclockwise", "two_way"),
+            ),
+        ),
+        requires_physical_ic_count=True,
+        palette_bounds=(1, 8),
+        supports_fixed_colour=False,
+    ),
+    MusicVariant(
+        0x37,
+        "H6099 MusicMode.d case 55: default piece retained, UI indices 0/1 used as speed/fade",
+        "h6099_music_parameters",
+        bytes.fromhex("37" + _H6099_PALETTE + "000000"),
+        # The APK never calls setPiece and ignores UI index 2. Do not advertise those controls.
+        requires_physical_ic_count=True,
+        palette_bounds=(1, 8),
+        supports_fixed_colour=False,
+    ),
+)
+
+
 def music_variant(profile: ModelProfile, mode_code: int) -> MusicVariant | None:
-    return next((variant for variant in profile.music_variants if variant.mode_code == mode_code), None)
+    variant = next((variant for variant in profile.music_variants if variant.mode_code == mode_code), None)
+    ic = profile.physical_ic_count
+    if variant and variant.layout == "h6099_music_parameters" and mode_code == 0x34 and ic is not None:
+        minimum, maximum = (ceil(ic / 2), ic) if ic < 30 else (9, max(9, ceil(ic * 3 / 5)))
+        default = ceil(ic * 3 / 4) if ic < 30 else ceil(ic * 3 / 10)
+        variant = replace(
+            variant,
+            parameters=(
+                replace(variant.parameters[0], default=default, min_value=minimum, max_value=maximum),
+                *variant.parameters[1:],
+            ),
+        )
+    return variant
 
 
 def music_parameters_available(profile: ModelProfile, variant: MusicVariant) -> bool:
@@ -129,7 +241,9 @@ def music_params_for_mode(mode_code: int, profile: ModelProfile) -> tuple[MusicP
     variant = music_variant(profile, mode_code)
     return (
         variant.parameters
-        if variant is not None and variant.layout == "music_body" and music_parameters_available(profile, variant)
+        if variant is not None
+        and variant.layout in {"music_body", "h6099_music_parameters"}
+        and music_parameters_available(profile, variant)
         else ()
     )
 

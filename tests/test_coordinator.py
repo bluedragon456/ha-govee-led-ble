@@ -71,6 +71,7 @@ from custom_components.ha_govee_led_ble.light_commands import (
     build_white_brightness,
     kelvin_to_rgb,
 )
+from custom_components.ha_govee_led_ble.music_commands import prepare_music_request
 from custom_components.ha_govee_led_ble.native_scenes import build_native_scene_packets
 from custom_components.ha_govee_led_ble.scenes import MODEL_SCENES, SCENES
 from custom_components.ha_govee_led_ble.transport import WRITE_UUID, xor_checksum
@@ -377,7 +378,8 @@ async def test_restore_effect_control_state_reactivates_unmodified_diy_slot(coor
     )
 
     with (
-        patch.object(coord, "send_command", new_callable=AsyncMock) as send,
+        patch.object(coord, "send_command", wraps=coord.send_command) as send,
+        patch.object(coord, "_ensure_connected", return_value=_c(write_gatt_char=AsyncMock())),
         patch.object(coord, "async_observe_effect", new_callable=AsyncMock, return_value=True) as refresh,
     ):
         recovered = await coord.async_restore_effect_control_state(
@@ -386,7 +388,7 @@ async def test_restore_effect_control_state_reactivates_unmodified_diy_slot(coor
         )
 
     assert recovered is True
-    send.assert_awaited_once_with(proto.build_h617a_diy_activation(700))
+    send.assert_awaited_once_with(proto.build_h617a_diy_activation(700), state_values={"diy_code": 700})
     refresh.assert_awaited_once_with({"is_on": True, "diy_code": 700})
     assert coord.diy_code == 700
 
@@ -403,9 +405,41 @@ async def test_restore_effect_control_state_reapplies_complete_music_profile(coo
         music_separation_point=4,
         music_separation_gradient=False,
     )
+    packets = prepare_music_request("H617A", "separation", 50, (4, 5, 6), False, {"point": 4, "gradient": False})
+    states = (
+        {"is_on": True},
+        {
+            "music_mode": "separation",
+            "music_sensitivity": 50,
+            "music_color": (4, 5, 6),
+            "music_calm": False,
+            "video_mode": "off",
+            "effect": None,
+            "diy_code": None,
+        },
+        {},
+        {"music_separation_point": 4, "music_separation_gradient": False},
+    )
+    coord.rgb_color = (7, 8, 9)
+    snapshot = coord._pre_mode_snapshot
+    expected_state = {}
+
+    async def transmit(_uuid, packet, **_kwargs):
+        index = client.write_gatt_char.await_count - 1
+        assert packet == packets[index]
+        expected_state.update(states[index])
+        assert all(getattr(coord, field) == value for field, value in expected_state.items())
+        assert coord._control_arbiter.current_task_intent is ControlIntent.APPLY
+        if index == 0:
+            assert coord._pre_mode_snapshot is snapshot
+        else:
+            assert coord._pre_mode_snapshot.rgb == (7, 8, 9)
+
+    client = _c(write_gatt_char=AsyncMock(side_effect=transmit))
 
     with (
-        patch.object(coord, "send_command", new_callable=AsyncMock) as send,
+        patch.object(coord, "_ensure_connected", return_value=client),
+        patch.object(coord, "async_write_effect_sequence", wraps=coord.async_write_effect_sequence) as sequence,
         patch.object(coord, "refresh_state", new_callable=AsyncMock, return_value=True) as refresh,
     ):
         recovered = await coord.async_restore_effect_control_state(
@@ -414,20 +448,10 @@ async def test_restore_effect_control_state_reapplies_complete_music_profile(coo
         )
 
     assert recovered is True
-    assert send.await_args_list[1].kwargs["state_values"] == {
-        "music_mode": "separation",
-        "music_sensitivity": 50,
-        "music_color": (4, 5, 6),
-        "music_calm": False,
-        "video_mode": "off",
-        "effect": None,
-        "diy_code": None,
-    }
-    assert send.await_args_list[-1].kwargs["state_values"] == {
-        "music_separation_point": 4,
-        "music_separation_gradient": False,
-    }
-    assert send.await_count == 4
+    sequence.assert_awaited_once()
+    assert sequence.await_args.args == (packets,)
+    assert sequence.await_args.kwargs["packet_state_values"] == states
+    assert client.write_gatt_char.await_args_list == [call(WRITE_UUID, packet, response=False) for packet in packets]
     refresh.assert_awaited_once_with(expected_music_mode="separation")
 
 
@@ -508,16 +532,23 @@ async def test_blank_screen_recovery_preserves_live_policy(h6199, enabled, polic
             h6199._notify_callback(None, bytearray(_packet(0xAA, 0xA9, [0x0A, 0x06, 0, 0, 60, 0, 44, 1])))
         return client
 
+    async def refresh_policy(**kwargs):
+        if kwargs.get("refresh_display_settings") and None not in policy:
+            h6199._notify_callback(
+                None, bytearray(_packet(0xAA, 0xA9, [0x0A, 0x06, int(enabled), policy[0], policy[1], 0, policy[2], 0]))
+            )
+        return True
+
     with (
         patch.object(h6199, "_ensure_connected", new=AsyncMock(side_effect=connect)),
-        patch.object(h6199, "refresh_state", new=AsyncMock(return_value=True)) as refresh,
+        patch.object(h6199, "refresh_state", new=AsyncMock(side_effect=refresh_policy)) as refresh,
     ):
         if None in policy or change_during_restore:
             message = "policy changed before write" if change_during_restore else "policy state has not been read"
             with pytest.raises(ValueError, match=message):
                 await h6199.async_restore_effect_control_state(state, overwritten_diy_code=None)
             client.write_gatt_char.assert_not_awaited()
-            refresh.assert_not_awaited()
+            refresh.assert_awaited_once_with(refresh_display_settings=frozenset({"blank_screen"}))
             assert h6199.blank_screen is enabled
             assert "blank_screen" not in h6199._expected_state
         else:
@@ -526,9 +557,11 @@ async def test_blank_screen_recovery_preserves_live_policy(h6199, enabled, polic
             assert client.write_gatt_char.await_args_list == [
                 call(WRITE_UUID, packet, response=False) for packet in packets
             ]
-            assert refresh.await_args_list == ([] if enabled else [call(expected_blank_screen=True)]) + [
-                call(expected_on=False)
-            ]
+            assert refresh.await_args_list == (
+                []
+                if enabled
+                else [call(refresh_display_settings=frozenset({"blank_screen"})), call(expected_blank_screen=True)]
+            ) + [call(expected_on=False)]
             assert h6199.blank_screen is True
     assert (
         h6199.blank_screen_detection,
@@ -2408,6 +2441,7 @@ async def test_preview_observation_stays_read_only_when_device_is_silent(coord, 
         query_color_mode=True,
         query_white_balance=False,
         query_blank_screen=False,
+        query_black_border=False,
         query_relative_brightness=False,
     )
     disconnect.assert_not_awaited()
@@ -3164,14 +3198,17 @@ def test_white_balance_fills_the_untouched_axis_with_the_apps_own_neutral(coord)
     assert build_white_balance(*coord.white_balance, "H6199") == build_white_balance(21, 5, "H6199")
 
 
-def test_h6199_blank_screen_builder_clamps_durations() -> None:
+def test_h6199_blank_screen_builder_validates_durations() -> None:
     assert build_blank_screen(
         True,
         "H6199",
         detection=2,
-        low_brightness_duration_seconds=-1,
-        same_tone_duration_seconds=0x10000,
+        low_brightness_duration_seconds=0,
+        same_tone_duration_seconds=0xFFFF,
     ) == bytes.fromhex("33a90a0601020000ffff00000000000000000095")
+    for low, same in ((-1, 120), (10, 0x10000), (True, 120), (10, 1.5)):
+        with pytest.raises(ValueError, match="durations must be integer seconds"):
+            build_blank_screen(True, "H6199", 2, low, same)
 
 
 def test_generated_adapter_rejects_structurally_invalid_frames() -> None:

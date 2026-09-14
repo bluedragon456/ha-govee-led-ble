@@ -38,7 +38,7 @@ def expectations_from_packet(
         static_echoes_color=static_echoes_color,
     ):
         expectations["color_mode"] = color_mode
-    if get_profile(model).command_grammar == "H6199":
+    if get_profile(model).command_grammar in {"H6099", "H6199"}:
         if operation != "mode":
             return expectations
         mode = getattr(generated.body.sub_mode, "name", None)
@@ -47,6 +47,8 @@ def expectations_from_packet(
             music_mode = _MUSIC_SLUG_BY_ID.get(int(detail.mode))
             expectations["music_mode"] = music_mode
             expectations["music_sensitivity"] = int(detail.sensitivity)
+            if not getattr(detail, "is_legacy", True):
+                return expectations
             if music_mode == "rhythm":
                 expectations["music_calm"] = bool(detail.is_calm)
             expectations["music_color"] = (
@@ -57,7 +59,7 @@ def expectations_from_packet(
             return expectations
         if mode == "video":
             profile = get_profile(model)
-            if profile.video_grammar != "H6199":
+            if profile.video_grammar not in {"H6099", "H6199"}:
                 return expectations
             expectations["video_mode"] = detail.source.name
             if profile.supports_video_capture_region:
@@ -113,15 +115,17 @@ def _expected_color_mode(
     *,
     static_echoes_color: bool,
 ) -> tuple[ParsedMode, int | None] | None:
-    if get_profile(model).command_grammar == "H6199":
+    if get_profile(model).command_grammar in {"H6099", "H6199"}:
         if generated.opcode.name != "mode":
             return None
         mode = getattr(generated.body.sub_mode, "name", None)
         detail = generated.body.detail
         if mode == "music":
             return ParsedMode.MUSIC, None
+        if mode == "diy":
+            return ParsedMode.DIY, int(detail.code)
         if mode == "video":
-            return (ParsedMode.VIDEO, None) if get_profile(model).video_grammar == "H6199" else None
+            return (ParsedMode.VIDEO, None) if get_profile(model).video_grammar in {"H6099", "H6199"} else None
         if mode == "scene":
             return ParsedMode.SCENE, None
         if mode == "static_colour":

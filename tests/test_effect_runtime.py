@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from hashlib import sha256
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, call
 from uuid import uuid4
 
@@ -334,17 +334,28 @@ def _coordinator(*, readable: bool = True):
         before_write=None,
         attempt_started=None,
         progress=None,
+        write_guard=None,
+        packet_state_values=None,
+        packet_write_guard=None,
     ) -> None:
         if attempt_started is not None:
             await attempt_started(1)
         if before_write is not None:
             await before_write()
         for index, packet in enumerate(packets, start=1):
-            await coordinator.send_command(packet)
+            if write_guard is not None:
+                write_guard()
+            if packet_write_guard is not None:
+                packet_write_guard(index - 1)
+            if packet_state_values is None:
+                await coordinator.send_command(packet)
+            else:
+                await coordinator.send_command(packet, state_values=packet_state_values[index - 1])
             if progress is not None:
                 await progress(index)
 
     coordinator.async_write_effect_sequence = AsyncMock(side_effect=write_effect_sequence)
+    coordinator.async_write_music_sequence = MethodType(GoveeBLECoordinator.async_write_music_sequence, coordinator)
 
     async def observe(expectations, *, timeout):
         refreshed = await coordinator.refresh_state()
@@ -357,6 +368,19 @@ def _coordinator(*, readable: bool = True):
 def _profile_coordinator(model: str):
     coordinator = _coordinator()
     coordinator.active_mode = None
+    coordinator._field_revisions = {}
+
+    async def refresh(**kwargs):
+        if "blank_screen" in kwargs.get("refresh_display_settings", ()):
+            for field in (
+                "blank_screen_detection",
+                "blank_screen_low_brightness_duration_seconds",
+                "blank_screen_same_tone_duration_seconds",
+            ):
+                coordinator._field_revisions[field] = coordinator._field_revisions.get(field, 0) + 1
+        return True
+
+    coordinator.refresh_state.side_effect = refresh
 
     async def send_command(_packet, *, write_guard=None, state_values=None):
         if write_guard is not None:
@@ -482,7 +506,7 @@ async def test_saved_effect_powers_on_before_committed_upload(
     assert result.phase is DeploymentPhase.CONFIRMED
     assert coordinator.is_on is True
     assert coordinator.send_command.await_args_list == [
-        call(build_power(True, coordinator.model)),
+        call(build_power(True, coordinator.model), write_guard=ANY),
         *(call(packet) for packet in compiled.packets),
     ]
 
@@ -671,7 +695,7 @@ async def test_verification_retry_only_repeats_safe_activation(
     assert coordinator.send_command.await_args_list == [
         *[call(packet) for packet in compiled.upload_packets],
         call(compiled.activation_packet),
-        call(compiled.activation_packet),
+        call(compiled.activation_packet, write_guard=ANY),
     ]
     assert coordinator.refresh_state.await_count == 3
 
@@ -1657,7 +1681,7 @@ async def test_h6199_upload_without_selector_readback_stays_uncertain(
     assert coordinator.send_command.await_args_list == [
         *[call(packet) for packet in compiled.upload_packets],
         call(compiled.activation_packet),
-        call(compiled.activation_packet),
+        call(compiled.activation_packet, write_guard=ANY),
     ]
     assert coordinator.refresh_state.await_count == 3
 

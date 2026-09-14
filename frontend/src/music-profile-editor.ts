@@ -5,6 +5,7 @@ import { live } from "lit/directives/live.js";
 import type { CheckboxControlChange } from "./checkbox-control";
 import "./checkbox-control";
 import "./info-control";
+import "./palette-editor";
 import type { LivePreviewInteraction } from "./live-preview-controller";
 import { reactiveParameterValueText } from "./effect-editor-model";
 import { recentColour } from "./recent-colours";
@@ -28,7 +29,7 @@ import type {
   MusicProfileContent,
   RGB,
 } from "./types";
-import { clampInteger, cloneRgb } from "./ui-utils";
+import { clampInteger, clonePalette, cloneRgb } from "./ui-utils";
 
 export interface MusicModeChange {
   mode: string;
@@ -166,6 +167,27 @@ export class GoveeMusicProfileEditor extends LitElement {
             : nothing}
 
           ${this.renderModeParameters(this.content)}
+          ${this.settings?.palette ? html`
+            <div class="field">
+              <span>Music colours</span>
+              <govee-palette-editor
+                .palette=${this.content.palette ?? this.settings.palette.default}
+                .minColours=${this.settings.palette.min}
+                .maxColours=${this.settings.palette.max}
+                .disabled=${this.disabled}
+                .ariaLabel=${"Music colours"}
+                @palette-changed=${(event: CustomEvent<{palette: RGB[]; interaction: LivePreviewInteraction}>) => {
+                  this.updateContent(content => ({...content, palette: clonePalette(event.detail.palette)}), event.detail.interaction);
+                }}
+              ></govee-palette-editor>
+              ${this.content.palette === undefined ? nothing : html`
+                <button type="button" ?disabled=${this.disabled} @click=${() => this.updateContent(content => {
+                  delete content.palette;
+                  return content;
+                })}>Use default colours</button>
+              `}
+            </div>
+          ` : nothing}
         </div>
       </section>
     `;

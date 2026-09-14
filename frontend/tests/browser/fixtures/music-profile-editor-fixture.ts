@@ -3,8 +3,13 @@ import type { GoveeMusicProfileEditor } from "../../../src/music-profile-editor"
 import { decodeCustomCataloguePayload } from "../../../src/catalogue-validation";
 import { decodeEffectContent } from "../../../src/validation";
 import contracts from "../../fixtures/backend-contracts.json";
+import { studioTokenStyles } from "../../../src/studio-styles";
 
 const editor = document.querySelector<GoveeMusicProfileEditor>("govee-music-profile-editor")!;
+await editor.updateComplete;
+const tokens = new CSSStyleSheet();
+tokens.replaceSync(studioTokenStyles.cssText);
+editor.shadowRoot!.adoptedStyleSheets = [...editor.shadowRoot!.adoptedStyleSheets, tokens];
 // Synthetic alternative exercises the existing control contract, not device support.
 const catalogue = decodeCustomCataloguePayload(contracts.responses.custom_catalogue, decodeEffectContent).models.H617A;
 editor.catalogue = catalogue;
@@ -21,6 +26,10 @@ editor.content = {
   colour: null, calm: null, parameters: {},
 };
 editor.modeSelectionEnabled = true;
+if (new URLSearchParams(location.search).has("palette")) {
+  // H6099 evidence-backed bounds with synthetic colours for editor interaction checks.
+  catalogue.music_settings.separation.palette = { min: 1, max: 8, default: [[12, 34, 56], [78, 90, 123]] };
+}
 if (new URLSearchParams(location.search).has("fountain")) {
   catalogue.music_settings.fountain.parameters.speed = {
     kind: "number", default: 80, min: 16, max: 80, options: [],

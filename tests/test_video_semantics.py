@@ -114,7 +114,7 @@ async def test_alternate_roundtrip_writer_parser_observation_and_recovery(
         if field not in {"is_on", "video_mode"}:
             assert getattr(coordinator, field) == value
             assert coordinator._field_revisions[field] == 1
-    coordinator._client = MagicMock(is_connected=True)
+    coordinator._client = MagicMock(is_connected=True, disconnect=AsyncMock())
     monkeypatch.setattr(coordinator, "_send_state_queries", AsyncMock(return_value=True))
     assert await coordinator.async_observe_effect(expected, timeout=0.001) is None
 
@@ -141,7 +141,6 @@ async def test_alternate_roundtrip_writer_parser_observation_and_recovery(
     assert packets[1] in writes and packets[2] in writes
     unavailable = replace(profile, read_domains=frozenset({ReadDomain.POWER, ReadDomain.COLOUR_MODE}))
     assert compiled_observation(compiled, profile=unavailable)[1] is ObservationConfidence.MODE_MATCH
-    assert "H6099" not in MODEL_PROFILES
 
 
 async def test_legacy_calibration_hash_and_omitted_registers(hass: HomeAssistant) -> None:

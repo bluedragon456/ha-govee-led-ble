@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 from .h6199_calibration import WHITE_BALANCE_POSITIONS
-from .music_semantics import H617A_MUSIC_VARIANTS, MusicVariant
+from .music_semantics import H617A_MUSIC_VARIANTS, H6099_MUSIC_VARIANTS, MusicVariant
 
 DOMAIN = "ha_govee_led_ble"
 CONF_MODEL = "model"
@@ -89,6 +89,7 @@ class VideoFirmwareCondition:
             "white_balance",
             "relative_brightness",
             "blank_screen",
+            "black_border",
         }:
             raise ValueError("unknown video firmware control")
         if self.identity_field not in {"fw_version", "hw_version", "subordinate_20_version", "subordinate_21_version"}:
@@ -120,6 +121,7 @@ class ModelProfile:
     video_modes: tuple[str, ...] = ()
     supports_video_capture_region: bool = False
     supports_video_saturation: bool = False
+    video_saturation_min: int = 0
     supports_video_sound_effects: bool = False
     supports_advanced_effects: bool = False
     supports_multi_layered_effects: bool = False
@@ -132,8 +134,10 @@ class ModelProfile:
     video_brightness_zones: tuple[str, ...] = ()
     supports_relative_brightness: bool = False
     supports_blank_screen: bool = False
+    supports_black_border: bool = False
     music_modes: tuple[str, ...] = ()
     music_variants: tuple[MusicVariant, ...] = ()
+    music_upload_before_selector: bool = False
     # Physical IC count is independent of logical segment_count. None means unknown.
     physical_ic_count: int | None = None
     music_sensitivity_min: int = 0
@@ -158,6 +162,8 @@ class ModelProfile:
             type(self.physical_ic_count) is not int or self.physical_ic_count <= 0
         ):
             raise ValueError("physical IC count must be a positive integer or unknown")
+        if type(self.video_saturation_min) is not int or not 0 <= self.video_saturation_min <= 100:
+            raise ValueError("video saturation minimum must be from 0 to 100")
         if not self.setup_required_read_domains <= self.read_domains:
             raise ValueError("setup-required read domains must also be readable")
         if len({condition.control for condition in self.video_firmware_conditions}) != len(
@@ -191,6 +197,7 @@ class ModelProfile:
             or self.supports_white_balance
             or self.supports_relative_brightness
             or self.supports_blank_screen
+            or self.supports_black_border
         ) and not self.supports_video_mode:
             raise ValueError("video settings require video-mode support")
         if self.supports_white_balance:
@@ -217,6 +224,10 @@ class ModelProfile:
 
     def can_read(self, domain: ReadDomain) -> bool:
         return domain in self.read_domains
+
+    def validate_video_saturation(self, value: int) -> None:
+        if type(value) is not int or not self.video_saturation_min <= value <= 100:
+            raise ValueError(f"video saturation must be from {self.video_saturation_min} to 100")
 
     @property
     def requires_notifications(self) -> bool:
@@ -324,6 +335,74 @@ _H617A_PROFILE = ModelProfile(
 
 
 MODEL_PROFILES: dict[str, ModelProfile] = {
+    "H6099": ModelProfile(
+        "H6099 TV Backlight 3 Lite",
+        support_quality=SupportQuality.EXPERIMENTAL,
+        command_grammar="H6099",
+        status_grammar="H6099",
+        effect_grammar="H6099",
+        video_grammar="H6099",
+        video_firmware_conditions=(VideoFirmwareCondition("black_border", "subordinate_21_version", "1.00.11"),),
+        read_domains=frozenset(
+            {
+                ReadDomain.POWER,
+                ReadDomain.BRIGHTNESS,
+                ReadDomain.COLOUR_MODE,
+                ReadDomain.FIRMWARE,
+                ReadDomain.HARDWARE,
+                ReadDomain.DISPLAY_SETTING,
+                ReadDomain.SUBORDINATE_20,
+                ReadDomain.SUBORDINATE_21,
+                ReadDomain.RELATIVE_BRIGHTNESS,
+                ReadDomain.SEGMENTS,
+            }
+        ),
+        setup_required_read_domains=frozenset({ReadDomain.POWER, ReadDomain.BRIGHTNESS, ReadDomain.COLOUR_MODE}),
+        supports_rgb=True,
+        supports_color_temperature=True,
+        static_readback_kelvin=True,
+        supports_scenes=True,
+        supports_video_mode=True,
+        video_modes=("movie", "game"),
+        supports_video_capture_region=True,
+        supports_video_saturation=True,
+        video_saturation_min=1,
+        supports_video_sound_effects=True,
+        supports_white_balance=True,
+        video_white_balance_representation="scalar",
+        video_white_balance_default=50,
+        video_white_balance_max=100,
+        video_white_balance_calibration=tuple((value,) for value in range(1, 101)),
+        video_brightness_zones=("left", "top", "right", "bottom"),
+        supports_relative_brightness=True,
+        supports_blank_screen=True,
+        supports_black_border=True,
+        music_variants=H6099_MUSIC_VARIANTS,
+        music_upload_before_selector=True,
+        supports_music_color=True,
+        music_modes=(
+            "energetic",
+            "rhythm",
+            "spectrum",
+            "rolling",
+            "separation",
+            "hopping",
+            "piano_keys",
+            "fountain",
+            "day_and_night",
+            "bloom",
+            "shiny",
+        ),
+        whole_device_mask=0x3FFF,
+        segment_count=14,
+        segment_group_size=4,
+        supports_segment_writes=True,
+        scene_catalogue_sku="H6099",
+        supports_custom_effects=True,
+        default_effect_families_override=frozenset({EFFECT_FAMILY_VIDEO}),
+        # Ordinary DIY uses Sub4Diy, not an H6199 scene or Workshop carrier.
+        effect_readback="diy_code_only",
+    ),
     "H617A": _H617A_PROFILE,
     "H617E": replace(
         _H617A_PROFILE,

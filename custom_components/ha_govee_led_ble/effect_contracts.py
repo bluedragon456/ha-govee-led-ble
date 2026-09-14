@@ -356,6 +356,57 @@ _RELEASE_CAPABILITY_BASE: Final = (
 
 
 RELEASE_CAPABILITY_CONTRACT: Final = (
+    *(
+        _capability(
+            "H6099",
+            workflow,
+            label,
+            kind,
+            ApplicationRoute.HOME_ASSISTANT_CONTROL,
+            CompilerDeployerStrategy.A3_EFFECT_UPLOAD,
+            VerificationConfidence.UNVERIFIED,
+            PhysicalValidationState.NOT_VALIDATED,
+            EvidenceClassification.STRUCTURAL,
+        )
+        for workflow, label, kind in (
+            (CapabilityWorkflow.PAINTED, "Graffiti", "h617a_painted"),
+            (CapabilityWorkflow.SINGLE, "Basic", "h617a_single"),
+            (CapabilityWorkflow.MULTI, "Mixed", "h617a_multi"),
+        )
+    ),
+    _capability(
+        "H6099",
+        CapabilityWorkflow.NATIVE_SCENES,
+        "Scenes",
+        "scene_builtin",
+        ApplicationRoute.STUDIO_SCENE_APPLY,
+        CompilerDeployerStrategy.NATIVE_EFFECT_SELECTION,
+        VerificationConfidence.UNVERIFIED,
+        PhysicalValidationState.NOT_VALIDATED,
+        EvidenceClassification.STRUCTURAL,
+    ),
+    _capability(
+        "H6099",
+        CapabilityWorkflow.NATIVE_MUSIC,
+        "Music",
+        "music_profile",
+        ApplicationRoute.HOME_ASSISTANT_CONTROL,
+        CompilerDeployerStrategy.COORDINATOR_WRITER,
+        VerificationConfidence.UNVERIFIED,
+        PhysicalValidationState.NOT_VALIDATED,
+        EvidenceClassification.STRUCTURAL,
+    ),
+    _capability(
+        "H6099",
+        CapabilityWorkflow.VIDEO,
+        "Video",
+        "video_profile",
+        ApplicationRoute.HOME_ASSISTANT_CONTROL,
+        CompilerDeployerStrategy.COORDINATOR_WRITER,
+        VerificationConfidence.UNVERIFIED,
+        PhysicalValidationState.NOT_VALIDATED,
+        EvidenceClassification.STRUCTURAL,
+    ),
     *(capability for capability in _RELEASE_CAPABILITY_BASE if capability.model == "H617A"),
     *(replace(capability, model="H617E") for capability in _RELEASE_CAPABILITY_BASE if capability.model == "H617A"),
     *(capability for capability in _RELEASE_CAPABILITY_BASE if capability.model == "H6199"),
@@ -378,7 +429,7 @@ def release_capability(model: str, workflow: CapabilityWorkflow) -> ReleaseCapab
 
 
 def require_effect_route(
-    model: str, workflow: CapabilityWorkflow, grammars: tuple[str, ...] = ("H617A", "H6199")
+    model: str, workflow: CapabilityWorkflow, grammars: tuple[str, ...] = ("H617A", "H6199", "H6099")
 ) -> str:
     """Require exact-model workflow authorization and matching effect/command grammar."""
     capability = release_capability(model, workflow)
@@ -478,6 +529,7 @@ class DeviceEffectCapabilities:
     workshop: CapabilityState
     readback: str
     effect_categories: tuple[str, ...]
+    physical_ic_count: int | None = None
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
@@ -486,6 +538,7 @@ class DeviceEffectCapabilities:
             "model": self.model,
             "display_name": self.display_name,
             "segment_count": self.segment_count,
+            "physical_ic_count": self.physical_ic_count,
             "custom_effects": {
                 "painted": self.painted.value,
                 "single": self.single.value,
@@ -511,6 +564,7 @@ def device_effect_capabilities(
     *,
     light_entity_id: str | None = None,
     effect_categories: tuple[str, ...] | None = None,
+    physical_ic_count: int | None = None,
 ) -> DeviceEffectCapabilities:
     return DeviceEffectCapabilities(
         config_entry_id=config_entry_id,
@@ -518,6 +572,7 @@ def device_effect_capabilities(
         model=model,
         display_name=display_name,
         segment_count=segment_count,
+        physical_ic_count=physical_ic_count,
         painted=studio_apply_capability_state(model, CapabilityWorkflow.PAINTED),
         single=studio_apply_capability_state(model, CapabilityWorkflow.SINGLE),
         multi=studio_apply_capability_state(model, CapabilityWorkflow.MULTI),

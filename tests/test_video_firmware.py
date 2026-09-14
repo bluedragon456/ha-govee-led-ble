@@ -78,7 +78,6 @@ def test_correct_identity_and_qualification(monkeypatch: pytest.MonkeyPatch, ver
     assert (
         video_control_states(MODEL_PROFILES["H6199"], SimpleNamespace())["white_balance"] is CapabilityState.SUPPORTED
     )
-    assert "H6099" not in MODEL_PROFILES
 
 
 async def test_admission_recheck_omission_and_recovery(hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch):
@@ -755,6 +754,15 @@ async def test_rejected_register_does_not_arm_expectations(hass, monkeypatch, se
     )
     before = coordinator.capture_effect_control_state()
     requested = {"white_balance": (25, 6), "relative_brightness": (70, 70, 70, 70), "blank_screen": False}[setting]
+
+    async def fresh_policy(**kwargs):
+        coordinator._notify_callback(None, reply(build_blank_screen(True, "H6199", 2, 10, 120)))
+        return True
+
+    if setting == "blank_screen":
+        from custom_components.ha_govee_led_ble.generated_protocol_adapter import build_blank_screen
+
+        monkeypatch.setattr(coordinator, "refresh_state", fresh_policy)
     with pytest.raises(ValueError, match="unsupported"):
         await getattr(controls, f"apply_{setting}")(coordinator, requested)
     physical.assert_not_awaited()
@@ -1034,6 +1042,9 @@ async def test_blank_screen_never_replays_superseded_policy(hass, monkeypatch, e
         return client
 
     async def verify(**kwargs):
+        if kwargs == {"refresh_display_settings": frozenset({"blank_screen"})}:
+            coordinator._notify_callback(None, reply(build_blank_screen(not enabled, "H6199", 2, 10, 120)))
+            return True
         assert kwargs == {"expected_blank_screen": enabled}
         if change_at == "verify":
             observe_policy()

@@ -129,6 +129,7 @@ class _GoveeLightServicesMixin(_GoveeLightOwner):
             requested_fs = full_screen if capture_region is None else capture_region == "full"
             resolved_fs = requested_fs if c.profile.supports_video_capture_region else c.video_full_screen
             resolved_saturation = saturation if c.profile.supports_video_saturation else c.video_saturation
+            c.profile.validate_video_saturation(resolved_saturation)
             supports_sound = c.profile.supports_video_sound_effects
             resolved_sound = sound_effects and supports_sound
             resolved_softness = (
@@ -153,6 +154,7 @@ class _GoveeLightServicesMixin(_GoveeLightOwner):
             )
 
             def check_retained() -> None:
+                c.profile.validate_video_saturation(resolved_saturation)
                 changed_controls = {
                     control for control, changed in (
                         ("capture_region", resolved_fs != c.video_full_screen),

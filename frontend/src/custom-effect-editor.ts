@@ -152,7 +152,7 @@ export class GoveeCustomEffectEditor extends LitElement {
             <span class="parameter-label">Colours</span>
             ${this.renderPalette()}
           </div>
-          <govee-slider-control
+          ${minimum === maximum ? nothing : html`<govee-slider-control
             .label=${rateLabel}
             .value=${this.content.speed}
             .minimum=${minimum}
@@ -163,7 +163,7 @@ export class GoveeCustomEffectEditor extends LitElement {
                 ...this.content!,
                 speed: event.detail.value,
               }, event.detail.interaction)}
-          ></govee-slider-control>
+          ></govee-slider-control>`}
         </div>
       </section>
     `;
@@ -411,7 +411,8 @@ export class GoveeCustomEffectEditor extends LitElement {
       <govee-palette-editor
         .palette=${this.content!.palette}
         .minColours=${this.catalogue!.limits.palette_min}
-        .maxColours=${this.catalogue!.limits.palette_max}
+        .maxColours=${this.content!.kind === "h617a_multi" ? this.catalogue!.limits.palette_max :
+          this.effectFamily(this.content! as EffectPair)?.palette_max ?? this.catalogue!.limits.palette_max}
         .disabled=${this.disabled}
         @palette-changed=${(
           event: CustomEvent<{

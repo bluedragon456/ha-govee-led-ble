@@ -22,7 +22,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, supported_effect_categories
+from .const import DOMAIN, ModelProfile, supported_effect_categories
 from .effect_backend import EffectBackend
 from .effect_catalogue import (
     custom_effect_catalogue_payload,
@@ -76,6 +76,7 @@ from .effect_storage import (
 from .effect_template_defaults import CatalogueTemplateDefault
 from .effect_websocket_payloads import (
     deployment_snapshot_payload,
+    device_music_settings,
     item_summary,
     library_snapshot_payload,
 )
@@ -213,8 +214,10 @@ def _device_payload(
         coordinator.profile.segment_count,
         light_entity_id=_light_entity_id(hass, entry.entry_id),
         effect_categories=tuple(coordinator.effect_categories),
+        physical_ic_count=coordinator.profile.physical_ic_count,
     ).to_dict()
     device["active_state"] = observed.to_public_dict()
+    device.update(device_music_settings(coordinator.model, profile=coordinator.profile))
     device["video_control_states"] = {
         key: value.value for key, value in video_control_states(coordinator.profile, coordinator).items()
     }
@@ -550,8 +553,10 @@ def _template_default_detail(
     config_entry_id: str,
     model: str,
     template_id: str,
+    *,
+    profile: ModelProfile | None = None,
 ) -> dict[str, Any]:
-    template = resolve_catalogue_template(model, template_id)
+    template = resolve_catalogue_template(model, template_id, profile=profile)
     stored = backend.template_defaults.get(config_entry_id, template_id)
     if stored is not None and stored.model != model:
         stored = None
@@ -586,6 +591,7 @@ def ws_template_default_get(
             entry.entry_id,
             entry.runtime_data.model,
             msg["template_id"],
+            profile=entry.runtime_data.profile,
         )
     except ValueError as exc:
         connection.send_error(msg["id"], "not_found", str(exc))
@@ -620,6 +626,7 @@ async def ws_template_default_set(
             entry.runtime_data.model,
             msg["template_id"],
             content,
+            profile=entry.runtime_data.profile,
         )
         if effect_content_hash(content) == effect_content_hash(template.content):
             await backend.template_defaults.async_delete(entry.entry_id, msg["template_id"])
@@ -646,6 +653,7 @@ async def ws_template_default_set(
             entry.entry_id,
             entry.runtime_data.model,
             msg["template_id"],
+            profile=entry.runtime_data.profile,
         ),
     )
 
@@ -670,7 +678,7 @@ async def ws_template_default_reset(
         return
     backend = _backend(hass)
     try:
-        resolve_catalogue_template(entry.runtime_data.model, msg["template_id"])
+        resolve_catalogue_template(entry.runtime_data.model, msg["template_id"], profile=entry.runtime_data.profile)
         await backend.template_defaults.async_delete(entry.entry_id, msg["template_id"])
     except ValueError as exc:
         connection.send_error(msg["id"], "not_found", str(exc))
@@ -685,6 +693,7 @@ async def ws_template_default_reset(
             entry.entry_id,
             entry.runtime_data.model,
             msg["template_id"],
+            profile=entry.runtime_data.profile,
         ),
     )
 
@@ -1324,6 +1333,7 @@ async def ws_apply(
             msg["item_id"],
             model=entry.runtime_data.model,
             expected_version=msg["expected_version"],
+            profile=entry.runtime_data.profile,
         ) as item:
             validate_video_request(entry.runtime_data, item.content)
             await backend.preview.async_supersede_device(entry.entry_id, reason="committed_apply")
@@ -1393,7 +1403,10 @@ async def ws_apply_snapshot(
         )
         operation_id = UUID(msg["operation_id"]) if "operation_id" in msg else None
         compile_application(
-            item, entry.runtime_data.model, diy_code=resolve_diy_code(item, model=entry.runtime_data.model)
+            item,
+            entry.runtime_data.model,
+            diy_code=resolve_diy_code(item, model=entry.runtime_data.model),
+            profile=entry.runtime_data.profile,
         )
         validate_video_request(entry.runtime_data, item.content)
         await backend.preview.async_supersede_device(entry.entry_id, reason="committed_apply")

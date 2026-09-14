@@ -133,6 +133,7 @@ def _make_coord(**ov) -> MagicMock:
         relative_brightness_strip_left=None,
         relative_brightness_strip_right=None,
         blank_screen=None,
+        black_border=None,
         blank_screen_detection=2,
         blank_screen_low_brightness_duration_seconds=10,
         blank_screen_same_tone_duration_seconds=120,

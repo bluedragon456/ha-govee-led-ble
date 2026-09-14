@@ -117,6 +117,7 @@ async def async_get_config_entry_diagnostics(
             for edge in coordinator.profile.video_brightness_zones
         },
         "blank_screen": coordinator.blank_screen,
+        "black_border": coordinator.black_border,
         "blank_screen_policy": {
             "detection": coordinator.blank_screen_detection,
             "low_brightness_duration_seconds": coordinator.blank_screen_low_brightness_duration_seconds,

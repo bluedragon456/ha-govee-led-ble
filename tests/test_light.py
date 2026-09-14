@@ -1547,7 +1547,7 @@ async def test_effect_reflects_active_video_mode(h6199_light, mock_h6199_coordin
     assert h6199_light.effect == "off"
 
 
-def test_registers_segment_services_during_integration_setup():
+def test_registers_light_services_during_integration_setup():
     hass = MagicMock()
     hass.data = {}
     async_register_light_services(hass)
@@ -2124,10 +2124,14 @@ async def test_failed_rgb_keeps_unset_music_style_for_native_bloom(hass, monkeyp
         await GoveeBLELight(coord).async_turn_on(rgb_color=(1, 2, 3))
     assert coord._music_calm is None
     coord.send_command = AsyncMock()
-    await coord.async_select_music_slug("bloom")
-    assert [call.args[0] for call in coord.send_command.await_args_list] == list(
-        prepare_music_request(coord.model, "bloom", 99, None, True, {})
-    )
+    from tests.test_music_commands import _music_transport
+
+    with _music_transport(coord) as physical:
+        await coord.async_select_music_slug("bloom")
+        assert [call.args[1] for call in physical.await_args_list] == list(
+            prepare_music_request(coord.model, "bloom", 99, None, True, {})
+        )
+    coord.send_command.assert_not_awaited()
 
 
 async def test_failed_rgb_preserves_newer_observed_music_style(hass):

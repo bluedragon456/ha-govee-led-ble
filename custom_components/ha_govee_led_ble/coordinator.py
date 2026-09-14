@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, cast
 
@@ -35,20 +36,24 @@ from .effect_commands import build_h617a_diy_activation
 from .effect_contracts import CapabilityState
 from .effect_deployments import PriorControlState
 from .generated_protocol_adapter import (
+    build_black_border_query,
     build_blank_screen_query,
     build_brightness,
     build_brightness_query,
     build_colour_mode_query,
     build_firmware_query,
-    build_h6199_subordinate_query,
+    build_h6099_diy_activation,
     build_hardware_query,
+    build_physical_ic_count_query,
     build_power,
     build_power_query,
     build_relative_brightness_query,
     build_segment_query,
+    build_subordinate_query,
     build_white_balance_query,
     parse_command_ack_result,
     parse_command_result,
+    parse_physical_ic_count,
 )
 from .govee_encryption import GoveeCryptoError
 from .govee_encryption.session import GoveeEncryptionSession
@@ -65,6 +70,7 @@ from .music_commands import prepare_music_profile_writes
 from .music_semantics import capture_music_parameters, music_params_for_mode, music_variant
 from .native_profile_controls import (
     apply_active_video_mode,
+    apply_black_border,
     apply_blank_screen,
     apply_relative_brightness,
     apply_white_balance,
@@ -212,9 +218,11 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         self.relative_brightness_strip_left: int | None = None
         self.relative_brightness_strip_right: int | None = None
         self.blank_screen: bool | None = None
+        self.black_border: bool | None = None
         self.blank_screen_detection: int | None = None
         self.blank_screen_low_brightness_duration_seconds: int | None = None
         self.blank_screen_same_tone_duration_seconds: int | None = None
+        self._blank_screen_notification_revision = 0
         self.music_separation_point = 1
         self.music_separation_gradient = True
         self.music_hopping_brightness = 50
@@ -223,9 +231,11 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         self.music_daynight_segments = 1
         self.music_daynight_speed = 10
         self.music_daynight_gradient = False
+        self._initialized_music_parameters: set[str] = set()
         for variant in self.profile.music_variants:
             for spec in music_params_for_mode(variant.mode_code, self.profile):
                 setattr(self, spec.key, spec.default)
+                self._initialized_music_parameters.add(spec.key)
         self.packet_log: list[dict[str, Any]] = []
         self._expected_state: dict[str, tuple[Any, float]] = {}
         self._notify_started_monotonic: float | None = None
@@ -264,6 +274,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             music_mode=self.music_mode,
             music_model=self.model,
             music_parameters=capture_music_parameters(self, self.profile, self.music_mode),
+            music_palette=self.music_palette,
             video_mode=self.video_mode,
             music_sensitivity=self.music_sensitivity,
             music_calm=self.music_calm,
@@ -291,6 +302,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             relative_brightness_strip_left=self.relative_brightness_strip_left,
             relative_brightness_strip_right=self.relative_brightness_strip_right,
             blank_screen=self.blank_screen,
+            black_border=self.black_border,
             blank_screen_detection=self.blank_screen_detection,
             blank_screen_low_brightness_duration_seconds=self.blank_screen_low_brightness_duration_seconds,
             blank_screen_same_tone_duration_seconds=self.blank_screen_same_tone_duration_seconds,
@@ -303,12 +315,17 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         overwritten_diy_code: int | None,
     ) -> bool:
         music_writes: tuple[tuple[bytes, dict[str, Any]], ...] = ()
+        physical_ic_count = self.profile.physical_ic_count
+        variant = None
         if state.mode == "music" and state.is_on:
             if state.music_model is not None and state.music_model != self.model:
                 raise ValueError("music recovery model does not match device")
             if state.music_mode not in self.profile.music_modes:
                 return False
             variant = music_variant(self.profile, MUSIC_MODE_SLUGS[state.music_mode])
+            if variant and variant.palette_bounds and state.music_palette is None:
+                # Palette readback is unavailable; never restore unknown colours with defaults.
+                return False
             # Legacy snapshots retain style across modes even when the active selector
             # has no style byte semantics. Do not reinterpret that retained value.
             music_calm = state.music_calm if variant and variant.supports_style else False
@@ -321,11 +338,24 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 self.model,
                 state.music_mode,
                 state.music_sensitivity,
-                state.music_color,
+                state.music_color
+                if self.profile.supports_music_color and (variant is None or variant.supports_fixed_colour)
+                else None,
                 music_calm,
                 music_parameters,
+                profile=self.profile,
+                palette=state.music_palette,
             )
         states = video_control_states(self.profile, self)
+        restore_policy = (
+            state.video_restore_controls is not None and "blank_screen_policy" in state.video_restore_controls
+        )
+        policy_revision = self._blank_screen_notification_revision
+
+        def check_policy() -> None:
+            if self._blank_screen_notification_revision != policy_revision:
+                raise ValueError("Blank-screen policy changed before recovery write; refresh and retry")
+
         permitted = {
             control
             for control, status in states.items()
@@ -345,7 +375,18 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                     "relative_brightness",
                     tuple(f"relative_brightness_{zone}" for zone in self.profile.video_brightness_zones),
                 ),
-                ("blank_screen", ("blank_screen",)),
+                (
+                    "blank_screen",
+                    (
+                        "blank_screen",
+                        "blank_screen_detection",
+                        "blank_screen_low_brightness_duration_seconds",
+                        "blank_screen_same_tone_duration_seconds",
+                    )
+                    if restore_policy
+                    else ("blank_screen",),
+                ),
+                ("black_border", ("black_border",)),
             )
             if (state.video_restore_controls is None or control in state.video_restore_controls)
             and any(
@@ -353,6 +394,20 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             )
         }
         complete = not (needed - permitted)
+        if (
+            restore_policy
+            and state.blank_screen is not None
+            and (state.video_restore_controls is None or "blank_screen" in state.video_restore_controls)
+            and any(
+                value is None
+                for value in (
+                    state.blank_screen_detection,
+                    state.blank_screen_low_brightness_duration_seconds,
+                    state.blank_screen_same_tone_duration_seconds,
+                )
+            )
+        ):
+            complete = False
         if (
             "white_balance" in permitted & needed
             and state.white_balance_scalar is not None
@@ -378,7 +433,27 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 tuple(getattr(state, f"relative_brightness_{zone}") for zone in self.profile.video_brightness_zones),
             )
         if "blank_screen" in permitted & needed and state.blank_screen is not None:
-            await apply_blank_screen(self, state.blank_screen)
+            if not restore_policy:
+                await apply_blank_screen(self, state.blank_screen)
+            elif (
+                state.blank_screen_detection is None
+                or state.blank_screen_low_brightness_duration_seconds is None
+                or state.blank_screen_same_tone_duration_seconds is None
+            ):
+                complete = False
+            else:
+                await apply_blank_screen(
+                    self,
+                    state.blank_screen,
+                    policy=(
+                        state.blank_screen_detection,
+                        state.blank_screen_low_brightness_duration_seconds,
+                        state.blank_screen_same_tone_duration_seconds,
+                    ),
+                    write_guard=check_policy,
+                )
+        if "black_border" in permitted & needed and state.black_border is not None:
+            await apply_black_border(self, state.black_border)
         if not state.is_on:
             await self.send_command(build_power(False, self.model))
             self.is_on = False
@@ -387,13 +462,22 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             if (
                 state.diy_code is None
                 or (overwritten_diy_code is not None and state.diy_code == overwritten_diy_code)
-                or not self.profile.supports_custom_effects
-                or self.profile.effect_grammar != "H617A"
-                or self.profile.command_grammar != "H617A"
+                or (
+                    self.profile.command_grammar != "H6099"
+                    and (
+                        not self.profile.supports_custom_effects
+                        or self.profile.effect_grammar != "H617A"
+                        or self.profile.command_grammar != "H617A"
+                    )
+                )
             ):
                 return False
-            await self.send_command(build_h617a_diy_activation(state.diy_code))
-            self.diy_code = state.diy_code
+            activation = (
+                build_h6099_diy_activation(state.diy_code)
+                if self.profile.command_grammar == "H6099"
+                else build_h617a_diy_activation(state.diy_code)
+            )
+            await self.send_command(activation, state_values={"diy_code": state.diy_code})
             return await self.async_observe_effect({"is_on": True, "diy_code": state.diy_code}) is True and complete
         if state.mode == "scene" and (state.effect is not None or state.scene_code is not None):
             resolved = (
@@ -426,12 +510,17 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             self.music_mode = self.video_mode = "off"
             return self.profile.state_readable and await self.refresh_state(expected_scene_code=scene.code) and complete
         if state.mode == "music" and state.music_mode in self.profile.music_modes:
-            for packet, state_values in music_writes:
-                await self.send_command(packet, state_values=state_values)
+            await self.async_write_music_sequence(
+                music_writes,
+                mode_code=MUSIC_MODE_SLUGS[state.music_mode],
+                physical_ic_count=physical_ic_count,
+                intent=ControlIntent.APPLY,
+            )
             return (
                 self.profile.state_readable
                 and await self.refresh_state(expected_music_mode=state.music_mode)
                 and complete
+                and not (variant and variant.palette_bounds)
             )
         if state.mode == "video" and state.video_mode in {"movie", "game"} and self.profile.supports_video_mode:
             for field, control in (
@@ -653,6 +742,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         # Invalidate authorization before reconnect can yield; unrelated display identity stays cached.
         for condition in self.profile.video_firmware_conditions:
             setattr(self, condition.identity_field, None)
+        if self.profile.command_grammar == "H6099":
+            self.profile = replace(self.profile, physical_ic_count=None)
         if self._client and self._client.is_connected:
             await self._disconnect_locked()
         self._connection_initializing = True
@@ -744,6 +835,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         self._notify_started_monotonic = None
         self._last_rx_monotonic = None
         self._expected_state.clear()
+        if self.profile.command_grammar == "H6099":
+            self.profile = replace(self.profile, physical_ic_count=None)
         self._stop_keep_alive()
         self._disconnect_generation += 1
         if self._cancel_disconnect:
@@ -951,6 +1044,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         if parsed.mode is ParsedMode.MUSIC:
             self._scene_code = None
             if parsed.music_mode is not None and self._accept_expected("music_mode", parsed.music_mode):
+                if parsed.music_mode != self.music_mode:
+                    self._music_palette = None
                 self.music_mode = parsed.music_mode
                 self.video_mode, self.effect = "off", None
                 self.diy_code = None
@@ -1000,11 +1095,13 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             self.music_mode = self.video_mode = "off"
             observed.append("effect")
         if accept_parameters:
-            if parsed.mode is ParsedMode.MUSIC and parsed.music_color is None:
+            if parsed.mode is ParsedMode.MUSIC and parsed.music_color_present and parsed.music_color is None:
                 if self._accept_expected("music_color", None):
                     self.music_color = None
                     observed.append("music_color")
             for attr in _COLOR_MODE_FIELDS:
+                if attr == "music_color" and not parsed.music_color_present:
+                    continue
                 if (value := getattr(parsed, attr)) is not None:
                     if self._accept_expected(attr, value):
                         setattr(self, attr, value)
@@ -1014,7 +1111,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             if parsed.rgb_color is not None and self.profile.static_readback_echoes_color:
                 static_values["rgb_color"] = parsed.rgb_color
             if parsed.color_temp_kelvin is not None and self.profile.static_readback_kelvin:
-                static_values["color_temp_kelvin"] = parsed.color_temp_kelvin
+                static_values["color_temp_kelvin"] = parsed.color_temp_kelvin or None
             accepted_values = dict(static_values)
             if "rgb_color" in static_values and "color_temp_kelvin" not in static_values:
                 kelvin = self.color_temp_kelvin
@@ -1106,7 +1203,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             elif domain is StatusDomain.BRIGHTNESS:
                 brightness_value = (
                     int(generated.body.percent)
-                    if self.profile.status_grammar == "H6199"
+                    if self.profile.status_grammar in {"H6099", "H6199"}
                     else int(generated.body.brightness_pct)
                 )
                 if self._accept_expected("brightness_pct", brightness_value):
@@ -1136,20 +1233,43 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                         self.white_balance_red, self.white_balance_blue = red, blue
                         observed = tuple(values)
                 else:
-                    blank_screen = bool(generated.body.payload.is_enabled) if generated.body.setting == 10 else None
+                    blank_screen = (
+                        bool(generated.body.payload.is_enabled)
+                        if getattr(generated.body.setting, "name", None) == "blank_screen"
+                        else None
+                    )
                     if blank_screen is not None:
                         payload = generated.body.payload
-                        self.blank_screen_detection = int(payload.detection)
-                        self.blank_screen_low_brightness_duration_seconds = int(payload.low_brightness_duration_seconds)
-                        self.blank_screen_same_tone_duration_seconds = int(payload.same_tone_duration_seconds)
-                        if self._accept_expected("blank_screen", blank_screen):
-                            self.blank_screen = blank_screen
-                            observed = (
-                                "blank_screen",
-                                "blank_screen_detection",
-                                "blank_screen_low_brightness_duration_seconds",
-                                "blank_screen_same_tone_duration_seconds",
-                            )
+                        values = {
+                            "blank_screen": blank_screen,
+                            "blank_screen_detection": int(payload.detection),
+                            "blank_screen_low_brightness_duration_seconds": int(
+                                payload.low_brightness_duration_seconds
+                            ),
+                            "blank_screen_same_tone_duration_seconds": int(payload.same_tone_duration_seconds),
+                        }
+                        # A filtered reply is not fresh state, but still invalidates recovery's write guard.
+                        self._blank_screen_notification_revision += 1
+                        # Legacy H6199 toggle writes retain live policy, even when the
+                        # enable echo is stale. Full policy writes remain atomic.
+                        if self.profile.status_grammar == "H6199" and not any(
+                            field in self._expected_state for field in values if field != "blank_screen"
+                        ):
+                            for field, setting_value in values.items():
+                                if field != "blank_screen":
+                                    setattr(self, field, setting_value)
+                        if self._accept_expected_values(values):
+                            for field, setting_value in values.items():
+                                setattr(self, field, setting_value)
+                            observed = tuple(values)
+                if (
+                    getattr(generated.body.setting, "name", None) == "black_border"
+                    and self.profile.supports_black_border
+                ):
+                    border = bool(generated.body.payload.is_enabled)
+                    if self._accept_expected("black_border", border):
+                        self.black_border = border
+                        observed = ("black_border",)
             elif domain is StatusDomain.RELATIVE_BRIGHTNESS:
                 zones = self.profile.video_brightness_zones
                 if generated.body.edge_count != len(zones):
@@ -1176,6 +1296,13 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 self.subordinate_20_version = generated.body.text or None
             elif domain is StatusDomain.SUBORDINATE_21:
                 self.subordinate_21_version = generated.body.text or None
+            elif (count := parse_physical_ic_count(generated)) is not None:
+                self.profile = replace(self.profile, physical_ic_count=count)
+                for variant in self.profile.music_variants:
+                    for spec in music_params_for_mode(variant.mode_code, self.profile):
+                        if spec.key not in self._initialized_music_parameters:
+                            setattr(self, spec.key, spec.default)
+                            self._initialized_music_parameters.add(spec.key)
             self._mark_received(domain, *observed)
             self.async_set_updated_data(self.data or {})
         except IndexError, ValueError:
@@ -1242,6 +1369,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         query_color_mode: bool = True,
         query_white_balance: bool | None = None,
         query_blank_screen: bool | None = None,
+        query_black_border: bool | None = None,
         query_relative_brightness: bool | None = None,
         query_segments: bool | None = None,
     ) -> bool:
@@ -1269,6 +1397,12 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 and (query_blank_screen if query_blank_screen is not None else full_query)
             ):
                 queries.append(build_blank_screen_query(self.model))
+            if (
+                self.profile.can_read(ReadDomain.DISPLAY_SETTING)
+                and video_control_states(self.profile, self)["black_border"] is CapabilityState.SUPPORTED
+                and (query_black_border if query_black_border is not None else full_query)
+            ):
+                queries.append(build_black_border_query(self.model))
             if (
                 self.profile.can_read(ReadDomain.RELATIVE_BRIGHTNESS)
                 and self.profile.supports_relative_brightness
@@ -1307,10 +1441,12 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         if self.profile.can_read(ReadDomain.FIRMWARE):
             candidates.append((build_firmware_query(self.model), "fw_version"))
         if self.profile.can_read(ReadDomain.SUBORDINATE_20):
-            candidates.append((build_h6199_subordinate_query(0x20), "subordinate_20_version"))
+            candidates.append((build_subordinate_query(0x20, self.model), "subordinate_20_version"))
         if self.profile.can_read(ReadDomain.SUBORDINATE_21):
-            candidates.append((build_h6199_subordinate_query(0x21), "subordinate_21_version"))
+            candidates.append((build_subordinate_query(0x21, self.model), "subordinate_21_version"))
         queries = [q for q, field in candidates if self._identity_field_incomplete(field)]
+        if self.profile.command_grammar == "H6099" and self.profile.physical_ic_count is None:
+            queries.append(build_physical_ic_count_query(self.model))
         try:
             for query in queries:
                 await self._async_write_packet(client, query)
@@ -1325,7 +1461,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         )
 
     def _identity_incomplete(self) -> bool:
-        return any(
+        return (self.profile.command_grammar == "H6099" and self.profile.physical_ic_count is None) or any(
             self._identity_field_incomplete(field)
             for domain, field in (
                 (ReadDomain.FIRMWARE, "fw_version"),
@@ -1360,8 +1496,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 for field, expected in expectations.items()
             ):
                 return True
-            if field_baselines:
-                return fresh_fields == field_baselines.keys()
+            if field_baselines and fresh_fields != field_baselines.keys():
+                return False
             return all(
                 self._domain_revisions.get(domain, 0) > baseline for domain, baseline in domain_baselines.items()
             )
@@ -1401,6 +1537,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         expected_white_brightness: int | None = None,
         expected_white_balance: tuple[int, ...] | None = None,
         expected_blank_screen: bool | None = None,
+        expected_blank_screen_policy: tuple[int, int, int] | None = None,
+        expected_black_border: bool | None = None,
         expected_relative_brightness: tuple[int, ...] | None = None,
         refresh_display_settings: bool | frozenset[str] = False,
         refresh_relative_brightness: bool = False,
@@ -1449,6 +1587,20 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             expectations.update(zip(fields, expected_white_balance, strict=True))
         if expected_blank_screen is not None:
             expectations["blank_screen"] = expected_blank_screen
+        if expected_blank_screen_policy is not None:
+            expectations.update(
+                zip(
+                    (
+                        "blank_screen_detection",
+                        "blank_screen_low_brightness_duration_seconds",
+                        "blank_screen_same_tone_duration_seconds",
+                    ),
+                    expected_blank_screen_policy,
+                    strict=True,
+                )
+            )
+        if expected_black_border is not None:
+            expectations["black_border"] = expected_black_border
         if expected_relative_brightness is not None:
             expectations["relative_brightness"] = (
                 expected_relative_brightness[0] if len(set(expected_relative_brightness)) == 1 else None
@@ -1484,21 +1636,37 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         )
         display_settings = (
             frozenset({"white_balance", "blank_screen"})
+            | (
+                {"black_border"}
+                if video_control_states(self.profile, self)["black_border"] is CapabilityState.SUPPORTED
+                else set()
+            )
             if refresh_display_settings is True
             else frozenset()
             if refresh_display_settings is False
             else refresh_display_settings
         )
-        if not display_settings <= {"white_balance", "blank_screen"}:
+        if not display_settings <= {"white_balance", "blank_screen", "black_border"}:
             raise ValueError("unknown display setting requested for refresh")
         query_white_balance = expected_white_balance is not None or "white_balance" in display_settings
-        query_blank_screen = expected_blank_screen is not None or "blank_screen" in display_settings
+        query_blank_screen = (
+            expected_blank_screen is not None
+            or expected_blank_screen_policy is not None
+            or "blank_screen" in display_settings
+        )
+        query_black_border = expected_black_border is not None or "black_border" in display_settings
+        if (
+            query_black_border
+            and video_control_states(self.profile, self)["black_border"] is not CapabilityState.SUPPORTED
+        ):
+            return False
         query_relative_brightness = expected_relative_brightness is not None or refresh_relative_brightness
         if refresh_all:
             query_power = query_brightness = True
             query_color = self.profile.supports_color_mode_readback
             query_white_balance = self.profile.supports_white_balance
             query_blank_screen = self.profile.supports_blank_screen
+            query_black_border = video_control_states(self.profile, self)["black_border"] is CapabilityState.SUPPORTED
             query_relative_brightness = self.profile.supports_relative_brightness
         if not any(
             (
@@ -1507,6 +1675,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 query_color,
                 query_white_balance,
                 query_blank_screen,
+                query_black_border,
                 query_relative_brightness,
             )
         ):
@@ -1518,7 +1687,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 (ReadDomain.POWER, query_power),
                 (ReadDomain.BRIGHTNESS, query_brightness),
                 (ReadDomain.COLOUR_MODE, query_color),
-                (ReadDomain.DISPLAY_SETTING, query_white_balance or query_blank_screen),
+                (ReadDomain.DISPLAY_SETTING, query_white_balance or query_blank_screen or query_black_border),
                 (ReadDomain.RELATIVE_BRIGHTNESS, query_relative_brightness),
             )
             if enabled and self.profile.can_read(domain)
@@ -1530,11 +1699,20 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         async with async_control_intent(self, intent):
             async with self._lock:
                 client = await self._ensure_connected()
+            border_supported = video_control_states(self.profile, self)["black_border"] is CapabilityState.SUPPORTED
+            if (expected_black_border is not None or "black_border" in display_settings) and not border_supported:
+                return False
+            if refresh_all:
+                query_black_border = border_supported
             deadline = time.monotonic() + timeout
             for attempt in range(2):
                 field_baselines = {field: self._field_revisions.get(field, 0) for field in expectations}
+                if refresh_all and query_black_border and required_domains is None:
+                    field_baselines["black_border"] = self._field_revisions.get("black_border", 0)
                 if refresh_display_settings:
                     display_fields: list[str] = []
+                    if query_black_border and "black_border" in display_settings:
+                        display_fields.append("black_border")
                     if self.profile.supports_white_balance and "white_balance" in display_settings:
                         display_fields.extend(
                             ("white_balance_scalar",)
@@ -1560,13 +1738,14 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 async with self._lock:
                     if self._client is not client:
                         return False
-                    if query_white_balance or query_blank_screen or query_relative_brightness:
+                    if query_white_balance or query_blank_screen or query_black_border or query_relative_brightness:
                         ok = await self._send_state_queries(
                             query_power=query_power,
                             query_brightness=query_brightness,
                             query_color_mode=query_color,
                             query_white_balance=query_white_balance,
                             query_blank_screen=query_blank_screen,
+                            query_black_border=query_black_border,
                             query_relative_brightness=query_relative_brightness,
                         )
                     else:
@@ -1701,12 +1880,16 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         expected_values: Mapping[str, Any] | None = None,
         attempt_started: Callable[[int], Awaitable[None]] | None = None,
         progress: Callable[[int], Awaitable[None]] | None = None,
+        packet_state_values: Sequence[Mapping[str, Any]] | None = None,
+        packet_write_guard: Callable[[int], None] | None = None,
     ) -> None:
         """Write one complete effect transaction, restarting from frame zero after reconnect."""
         if self.hass.is_stopping:
             raise RuntimeError("Home Assistant is stopping")
         if not packets:
             raise ValueError("effect sequence must contain at least one packet")
+        if packet_state_values is not None and len(packet_state_values) != len(packets):
+            raise ValueError("packet state must match the effect sequence length")
         async with async_control_intent(self, intent):
             async with self._lock:
                 for attempt in range(1, EFFECT_SEQUENCE_ATTEMPTS + 1):
@@ -1718,12 +1901,21 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                         if before_write is not None:
                             await before_write()
                         for index, packet in enumerate(packets, start=1):
+
+                            def guard(index: int = index) -> None:
+                                if write_guard is not None:
+                                    write_guard()
+                                if packet_write_guard is not None:
+                                    packet_write_guard(index - 1)
+
                             await self._async_write_packet(
                                 client,
                                 packet,
                                 arm_expected=True,
-                                before_write=write_guard,
-                                state_values=state_values,
+                                before_write=guard,
+                                state_values=(
+                                    state_values if packet_state_values is None else packet_state_values[index - 1]
+                                ),
                                 expected_values=expected_values,
                             )
                             self._renew_foreground_lease()
@@ -1799,7 +1991,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         query_white_balance = bool(
             set(expectations).intersection({"white_balance_red", "white_balance_blue", "white_balance_scalar"})
         )
-        query_blank_screen = "blank_screen" in expectations
+        query_blank_screen = any(field.startswith("blank_screen") for field in expectations)
+        query_black_border = "black_border" in expectations
         query_relative_brightness = bool(
             set(expectations).intersection(
                 {
@@ -1827,6 +2020,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                     query_color_mode=query_color,
                     query_white_balance=query_white_balance,
                     query_blank_screen=query_blank_screen,
+                    query_black_border=query_black_border,
                     query_relative_brightness=query_relative_brightness,
                 )
         if not ok or self._client is not client:

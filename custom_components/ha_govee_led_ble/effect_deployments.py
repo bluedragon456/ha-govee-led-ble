@@ -95,6 +95,7 @@ class PriorControlState:
     music_model: str | None = None
     # None is a legacy snapshot: read its named fields. An explicit mapping wins.
     music_parameters: Mapping[str, int | bool | str] | None = None
+    music_palette: tuple[tuple[int, int, int], ...] | None = None
     video_mode: str = "off"
     music_sensitivity: int = 100
     music_calm: bool = False
@@ -122,12 +123,18 @@ class PriorControlState:
     relative_brightness_strip_left: int | None = None
     relative_brightness_strip_right: int | None = None
     blank_screen: bool | None = None
+    black_border: bool | None = None
     blank_screen_detection: int | None = None
     blank_screen_low_brightness_duration_seconds: int | None = None
     blank_screen_same_tone_duration_seconds: int | None = None
     video_restore_controls: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
+        if self.music_palette is not None:
+            if not isinstance(self.music_palette, tuple) or not 1 <= len(self.music_palette) <= 8:
+                raise EffectStorageError("prior music palette must contain 1 to 8 colours")
+            for rgb in self.music_palette:
+                _validate_rgb(rgb, "prior music palette colour")
         if self.music_parameters is not None:
             if not isinstance(self.music_parameters, Mapping):
                 raise EffectStorageError("prior music parameters must be a mapping")
@@ -155,6 +162,8 @@ class PriorControlState:
                     "white_balance",
                     "relative_brightness",
                     "blank_screen",
+                    "blank_screen_policy",
+                    "black_border",
                 }
                 for control in self.video_restore_controls
             )
@@ -279,6 +288,8 @@ class PriorControlState:
                 raise EffectStorageError(f"{optional_name} must be from {minimum} to {maximum}")
         if self.blank_screen is not None and not isinstance(self.blank_screen, bool):
             raise EffectStorageError("prior blank-screen state must be a boolean or null")
+        if self.black_border is not None and type(self.black_border) is not bool:
+            raise EffectStorageError("prior black-border state must be a boolean or null")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -298,6 +309,7 @@ class PriorControlState:
             "music_mode": self.music_mode,
             "music_model": self.music_model,
             **({"music_parameters": dict(self.music_parameters)} if self.music_parameters is not None else {}),
+            **({"music_palette": [list(rgb) for rgb in self.music_palette]} if self.music_palette is not None else {}),
             "video_mode": self.video_mode,
             "music_sensitivity": self.music_sensitivity,
             "music_calm": self.music_calm,
@@ -331,6 +343,7 @@ class PriorControlState:
             "relative_brightness_right": self.relative_brightness_right,
             "relative_brightness_bottom": self.relative_brightness_bottom,
             "blank_screen": self.blank_screen,
+            **({"black_border": self.black_border} if self.black_border is not None else {}),
             "blank_screen_detection": self.blank_screen_detection,
             "blank_screen_low_brightness_duration_seconds": self.blank_screen_low_brightness_duration_seconds,
             "blank_screen_same_tone_duration_seconds": self.blank_screen_same_tone_duration_seconds,
@@ -338,6 +351,11 @@ class PriorControlState:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> PriorControlState:
+        palette = raw.get("music_palette")
+        if palette is not None:
+            if not isinstance(palette, list) or not 1 <= len(palette) <= 8:
+                raise EffectStorageError("invalid prior music palette")
+            palette = tuple(_required_rgb({"rgb": rgb}, "rgb") for rgb in palette)
         model = _optional_str(raw, "music_model")
         parameters = _required_mapping(raw, "music_parameters") if "music_parameters" in raw else None
         # Legacy records have no model and retain their shipped defaults. New records
@@ -370,6 +388,7 @@ class PriorControlState:
             music_mode=_optional_str(raw, "music_mode") or "off",
             music_model=model,
             music_parameters=parameters,
+            music_palette=palette,
             video_mode=_optional_str(raw, "video_mode") or "off",
             music_sensitivity=_optional_int(raw, "music_sensitivity", default=100),
             music_calm=_optional_bool(raw, "music_calm", default=False),
@@ -413,6 +432,7 @@ class PriorControlState:
             relative_brightness_right=_optional_int(raw, "relative_brightness_right"),
             relative_brightness_bottom=_optional_int(raw, "relative_brightness_bottom"),
             blank_screen=_optional_bool(raw, "blank_screen"),
+            black_border=_optional_bool(raw, "black_border"),
             blank_screen_detection=_optional_int(raw, "blank_screen_detection"),
             blank_screen_low_brightness_duration_seconds=_optional_int(
                 raw,

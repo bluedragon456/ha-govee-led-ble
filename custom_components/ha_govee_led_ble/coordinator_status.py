@@ -91,6 +91,7 @@ class ParsedColorModeResponse:
     music_sensitivity: int | None = None
     music_calm: bool | None = None
     music_color: tuple[int, int, int] | None = None
+    music_color_present: bool = True
     rgb_color: tuple[int, int, int] | None = None
     color_temp_kelvin: int | None = None
     white_brightness: int | None = None
@@ -105,7 +106,11 @@ def parse_color_mode(generated: Any, model: str) -> ParsedColorModeResponse:
         rgb = getattr(detail, "rgb", None)
         kelvin = getattr(detail, "kelvin", None)
         profile = get_profile(model)
-        if kelvin is not None and not profile.min_color_temp_kelvin <= int(kelvin) <= profile.max_color_temp_kelvin:
+        if (
+            kelvin is not None
+            and not (profile.status_grammar == "H6099" and kelvin == 0)
+            and not profile.min_color_temp_kelvin <= int(kelvin) <= profile.max_color_temp_kelvin
+        ):
             raise ValueError("static Kelvin outside profile range")
         return ParsedColorModeResponse(
             mode=ParsedMode.COLOUR,
@@ -113,12 +118,12 @@ def parse_color_mode(generated: Any, model: str) -> ParsedColorModeResponse:
             color_temp_kelvin=int(kelvin) if kelvin is not None else None,
             multi_effect_flag=getattr(detail, "sub", None),
         )
-    if get_profile(model).status_grammar == "H6199" or (
-        mode_name == "video" and get_profile(model).video_grammar == "H6199"
+    if get_profile(model).status_grammar in {"H6099", "H6199"} or (
+        mode_name == "video" and get_profile(model).video_grammar in {"H6099", "H6199"}
     ):
         if mode_name == "video":
             profile = get_profile(model)
-            if profile.video_grammar != "H6199":
+            if profile.video_grammar not in {"H6099", "H6199"}:
                 return ParsedColorModeResponse()
             detail = body.detail
             source_name = getattr(detail.source, "name", None)
@@ -129,12 +134,24 @@ def parse_color_mode(generated: Any, model: str) -> ParsedColorModeResponse:
                 mode=ParsedMode.VIDEO,
                 video_mode=source_name,
                 video_full_screen=region_name == "all" if profile.supports_video_capture_region else None,
-                video_saturation=int(detail.saturation) if profile.supports_video_saturation else None,
+                # Keep sibling video observations when firmware reports an unqualified saturation.
+                video_saturation=(
+                    int(detail.saturation)
+                    if profile.supports_video_saturation and profile.video_saturation_min <= detail.saturation <= 100
+                    else None
+                ),
                 video_sound_effects=bool(detail.sound_effects) if profile.supports_video_sound_effects else None,
                 video_sound_effects_softness=int(detail.softness) if profile.supports_video_sound_effects else None,
             )
         if mode_name == "music":
             detail = body.detail
+            if not getattr(detail, "is_legacy", True):
+                return ParsedColorModeResponse(
+                    mode=ParsedMode.MUSIC,
+                    music_mode=_MUSIC_SLUG_BY_ID.get(int(detail.mode)),
+                    music_sensitivity=int(detail.sensitivity),
+                    music_color_present=False,
+                )
             fixed_colour = None
             if detail.has_fixed_colour:
                 fixed_colour = (
@@ -156,6 +173,8 @@ def parse_color_mode(generated: Any, model: str) -> ParsedColorModeResponse:
                 effect=_SCENE_EFFECT_BY_MODEL_ID.get(model, {}).get(scene_code),
                 scene_code=scene_code,
             )
+        if mode_name == "diy":
+            return ParsedColorModeResponse(mode=ParsedMode.DIY, diy_code=int(body.detail.code))
         return ParsedColorModeResponse()
 
     if mode_name == "scene":

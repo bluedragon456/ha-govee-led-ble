@@ -46,11 +46,17 @@ from .control_arbiter import ControlIntent, async_control_intent
 from .coordinator import GoveeBLECoordinator
 from .coordinator_status import ParsedMode
 from .effect_backend import EffectBackend
-from .effect_compiler import CompiledMusicProfile, CompiledVideoProfile, compile_application
+from .effect_compiler import (
+    CompiledMusicProfile,
+    CompiledVideoProfile,
+    compile_application,
+    resolve_diy_code,
+    validate_compiled_geometry,
+)
 from .effect_contracts import CapabilityWorkflow, require_effect_route
 from .effect_deployments import DeploymentRecord
 from .effect_diagnostics import DiagnosticOutcome, DiagnosticStage
-from .effect_domain import EffectValidationError, LibraryItem, VideoProfile, effect_content_to_dict
+from .effect_domain import EffectValidationError, LibraryItem, effect_content_to_dict
 from .effect_runtime import (
     active_workspace_matches,
     async_apply_compiled_profile,
@@ -435,6 +441,7 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
             always_include_custom_effects=getattr(self.coordinator, "always_include_custom_effects", False) is True,
             active_custom=active_custom,
             native_categories=self._native_selector_categories,
+            profile=self.coordinator.profile,
         )
 
     def _matching_active_workspace(self) -> Any | None:
@@ -622,7 +629,7 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
         if stored is None or stored.model != self.coordinator.model:
             return None
         item = LibraryItem.new(template_id, stored.content)
-        compiled = compile_application(item, self.coordinator.model)
+        compiled = compile_application(item, self.coordinator.model, profile=self.coordinator.profile)
         validate_video_request(self.coordinator, item.content)
         if not isinstance(compiled, CompiledMusicProfile | CompiledVideoProfile):
             raise RuntimeError("native selector template default did not compile to a native profile")
@@ -680,6 +687,7 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
                     controls = requested_video_controls(compiled)
                     video_guards.append(lambda: require_video_controls(coordinator.profile, coordinator, controls))
                 return partial(async_apply_compiled_profile, coordinator, compiled)
+            coordinator.profile.validate_video_saturation(coordinator.video_saturation)
             retained = {
                 field: getattr(coordinator, f"video_{field}")
                 for field in (
@@ -707,16 +715,21 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
         if selected is not None and selected.source == "music":
             compiled = self._compile_template_default(f"template:music:{selected.value}")
             if compiled is not None:
+                if video_guards is not None:
+                    video_guards.append(lambda: validate_compiled_geometry(compiled, coordinator.profile))
                 return partial(async_apply_compiled_profile, coordinator, compiled)
             variant = music_variant(coordinator.profile, MUSIC_MODE_SLUGS[selected.value])
             prepare_music_request(
                 coordinator.model,
                 selected.value,
                 coordinator.music_sensitivity,
-                coordinator.music_color if coordinator.profile.supports_music_color else None,
+                coordinator.music_color
+                if coordinator.profile.supports_music_color and (variant is None or variant.supports_fixed_colour)
+                else None,
                 coordinator.music_calm if variant and variant.supports_style else False,
                 {},
                 include_parameters=bool(variant and variant.supports_style),
+                profile=coordinator.profile,
             )
             return partial(coordinator.async_select_music_slug, selected.value)
         raise ServiceValidationError(
@@ -792,7 +805,19 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
                 str(item.id),
                 model=self.coordinator.model,
                 expected_version=item.version,
+                profile=self.coordinator.profile,
             ) as current:
+                compiled = compile_application(
+                    current,
+                    self.coordinator.model,
+                    diy_code=resolve_diy_code(current, model=self.coordinator.model),
+                    profile=self.coordinator.profile,
+                )
+
+                def guard() -> None:
+                    validate_compiled_geometry(compiled, self.coordinator.profile)
+                    validate_video_request(self.coordinator, current.content)
+
                 validate_video_request(self.coordinator, current.content)
                 await self._async_supersede_preview()
                 async with async_control_intent(
@@ -801,11 +826,10 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
                 ):
                     if turn_on_kwargs is not None:
                         await self._async_turn_on(
-                            video_write_guard=(lambda: validate_video_request(self.coordinator, current.content))
-                            if isinstance(current.content, VideoProfile)
-                            else None,
+                            video_write_guard=guard,
                             **turn_on_kwargs,
                         )
+                    guard()
                     if operation_id is None:
                         return await self._effect_backend.engine.async_apply_saved(
                             self.coordinator,

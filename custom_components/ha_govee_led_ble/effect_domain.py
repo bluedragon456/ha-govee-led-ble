@@ -120,6 +120,8 @@ class PaintedEffect:
     speed: int
     brightness: int
     segments: tuple[RGB | None, ...]
+    background: RGB = (0, 0, 0)
+    addressing: str = "segments"
 
     def __post_init__(self) -> None:
         validate_bounded_string(
@@ -130,8 +132,13 @@ class PaintedEffect:
         )
         _validate_percent(self.speed, "speed")
         _validate_percent(self.brightness, "brightness")
-        if len(self.segments) != H617A_SEGMENT_COUNT:
+        _validate_rgb(self.background, "painted background")
+        if self.addressing not in {"segments", "physical_ic"}:
+            raise EffectValidationError("unknown painted addressing")
+        if self.addressing == "segments" and len(self.segments) != H617A_SEGMENT_COUNT:
             raise EffectValidationError(f"painted effect must contain exactly {H617A_SEGMENT_COUNT} segments")
+        if self.addressing == "physical_ic" and not 1 <= len(self.segments) <= 255:
+            raise EffectValidationError("painted effect must contain 1 to 255 physical ICs")
         for segment in self.segments:
             if segment is not None:
                 _validate_rgb(segment, "painted segment")
@@ -177,10 +184,18 @@ class MusicProfile:
     colour: RGB | None = None
     calm: bool | None = None
     parameters: Mapping[str, JsonValue] = field(default_factory=dict)
+    palette: tuple[RGB, ...] | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier(self.model, "model")
         _validate_identifier(self.mode, "mode")
+        if self.palette is not None:
+            if not isinstance(self.palette, tuple) or not 1 <= len(self.palette) <= 8:
+                raise EffectValidationError("music palette must contain 1 to 8 RGB tuples")
+            for rgb in self.palette:
+                _validate_rgb(rgb, "music palette colour")
+                if any(type(channel) is not int for channel in rgb):
+                    raise EffectValidationError("music palette channels must be integers")
         profile = MODEL_PROFILES.get(self.model)
         if profile is None:
             raise EffectValidationError(f"unsupported music-profile model {self.model!r}")
@@ -246,6 +261,10 @@ class VideoProfile:
     relative_brightness: RelativeBrightness | None
     blank_screen: bool | None
     white_balance_value: int | None = None
+    black_border: bool | None = None
+    blank_screen_detection: int | None = None
+    blank_screen_low_brightness_duration_seconds: int | None = None
+    blank_screen_same_tone_duration_seconds: int | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier(self.model, "model")
@@ -264,12 +283,13 @@ class VideoProfile:
             (self.white_balance_value, "white_balance_value", profile.supports_white_balance),
             (self.relative_brightness, "relative_brightness", profile.supports_relative_brightness),
             (self.blank_screen, "blank_screen", profile.supports_blank_screen),
+            (self.black_border, "black_border", profile.supports_black_border),
         ):
             _validate_video_setting(value, name, supported=supported)
         if self.full_screen is not None:
             _validate_bool(self.full_screen, "full_screen")
         if self.saturation is not None:
-            _validate_percent(self.saturation, "saturation")
+            _validate_range(self.saturation, "saturation", minimum=profile.video_saturation_min, maximum=100)
         if self.sound_effects is not None:
             _validate_bool(self.sound_effects, "sound_effects")
         if self.sound_effects_softness is not None:
@@ -300,6 +320,21 @@ class VideoProfile:
                     raise EffectValidationError("relative brightness must match the model topology")
         if self.blank_screen is not None:
             _validate_bool(self.blank_screen, "blank_screen")
+        if self.black_border is not None:
+            _validate_bool(self.black_border, "black_border")
+        policy = (
+            self.blank_screen_detection,
+            self.blank_screen_low_brightness_duration_seconds,
+            self.blank_screen_same_tone_duration_seconds,
+        )
+        if any(value is not None for value in policy):
+            if self.blank_screen is None or any(value is None for value in policy):
+                raise EffectValidationError("blank-screen policy requires the toggle, detection and both durations")
+            assert policy[0] is not None
+            _validate_range(policy[0], "blank_screen_detection", minimum=1, maximum=2)
+            for value in policy[1:]:
+                assert value is not None
+                _validate_range(value, "blank-screen duration seconds", minimum=0, maximum=65535)
 
 
 @dataclass(frozen=True, slots=True)
@@ -641,6 +676,8 @@ def _content_to_dict(content: EffectContent) -> dict[str, JsonValue]:
             "speed": content.speed,
             "brightness": content.brightness,
             "segments": [None if segment is None else list(segment) for segment in content.segments],
+            **({"background": list(content.background)} if content.background != (0, 0, 0) else {}),
+            **({"addressing": content.addressing} if content.addressing != "segments" else {}),
         }
     if isinstance(content, SingleEffect):
         return {
@@ -668,6 +705,7 @@ def _content_to_dict(content: EffectContent) -> dict[str, JsonValue]:
             "colour": None if content.colour is None else list(content.colour),
             "calm": content.calm,
             "parameters": dict(content.parameters),
+            **({"palette": [list(rgb) for rgb in content.palette]} if content.palette is not None else {}),
         }
     if isinstance(content, VideoProfile):
         return {
@@ -686,6 +724,18 @@ def _content_to_dict(content: EffectContent) -> dict[str, JsonValue]:
                 else _relative_brightness_to_dict(content.relative_brightness)
             ),
             "blank_screen": content.blank_screen,
+            **({"black_border": content.black_border} if content.black_border is not None else {}),
+            **(
+                {
+                    "blank_screen_detection": content.blank_screen_detection,
+                    "blank_screen_low_brightness_duration_seconds": (
+                        content.blank_screen_low_brightness_duration_seconds
+                    ),
+                    "blank_screen_same_tone_duration_seconds": content.blank_screen_same_tone_duration_seconds,
+                }
+                if content.blank_screen_detection is not None
+                else {}
+            ),
         }
     if isinstance(content, MultiEffect):
         return {
@@ -743,6 +793,8 @@ def _content_from_dict(raw: Mapping[str, Any]) -> EffectContent:
             speed=_required_int(raw, "speed"),
             brightness=_required_int(raw, "brightness"),
             segments=_painted_segments_from_value(raw.get("segments")),
+            background=_rgb_from_value(raw.get("background", [0, 0, 0]), "painted background"),
+            addressing=_optional_str(raw, "addressing") or "segments",
         )
     if kind == "h617a_single":
         return SingleEffect(
@@ -767,6 +819,7 @@ def _content_from_dict(raw: Mapping[str, Any]) -> EffectContent:
             colour=_required_optional_rgb(raw, "colour"),
             calm=_required_optional_bool(raw, "calm"),
             parameters=cast(dict[str, JsonValue], dict(_required_mapping(raw, "parameters"))),
+            palette=_palette_from_value(raw["palette"]) if "palette" in raw else None,
         )
     if kind == "video_profile":
         return VideoProfile(
@@ -780,6 +833,12 @@ def _content_from_dict(raw: Mapping[str, Any]) -> EffectContent:
             white_balance_value=_optional_int(raw, "white_balance_value"),
             relative_brightness=_optional_relative_brightness(raw, "relative_brightness"),
             blank_screen=_optional_bool(raw, "blank_screen"),
+            black_border=_optional_bool(raw, "black_border"),
+            blank_screen_detection=_optional_int(raw, "blank_screen_detection"),
+            blank_screen_low_brightness_duration_seconds=_optional_int(
+                raw, "blank_screen_low_brightness_duration_seconds"
+            ),
+            blank_screen_same_tone_duration_seconds=_optional_int(raw, "blank_screen_same_tone_duration_seconds"),
         )
     if kind == "h617a_multi":
         return MultiEffect(
@@ -831,8 +890,6 @@ def _content_from_dict(raw: Mapping[str, Any]) -> EffectContent:
 def _painted_segments_from_value(value: object) -> tuple[RGB | None, ...]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes):
         raise EffectValidationError("painted segments must be a list")
-    if len(value) != H617A_SEGMENT_COUNT:
-        raise EffectValidationError(f"painted effect must contain exactly {H617A_SEGMENT_COUNT} segments")
     return tuple(None if segment is None else _rgb_from_value(segment, "painted segment") for segment in value)
 
 

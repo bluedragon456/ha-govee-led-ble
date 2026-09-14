@@ -15,7 +15,9 @@ test("canonical backend catalogue decodes through the production catalogue valid
     backendContracts.responses.custom_catalogue,
   );
   expect(decoded.sku).toBe("H617A");
-  expect(Object.keys(decoded.models)).toEqual(["H617A", "H617E", "H6199"]);
+  expect(decoded.models.H6099.video_controls?.saturation_min).toBe(1);
+  expect(decoded.models.H6199.video_controls?.saturation_min).toBe(0);
+  expect(Object.keys(decoded.models)).toEqual(["H6099", "H617A", "H617E", "H6199"]);
   expect(decoded.models.H6199.video_settings).toEqual([
     "capture_region",
     "saturation",

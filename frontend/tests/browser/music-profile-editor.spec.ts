@@ -1,4 +1,35 @@
 import { expect, test } from "@playwright/test";
+import type { GoveeMusicProfileEditor } from "../../src/music-profile-editor";
+
+for (const width of [390, 1280]) {
+  test(`optional music palette edits, bounds and reset at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({width, height: 900});
+    await page.goto("/tests/browser/fixtures/music-profile-editor.html?palette");
+    const editor = page.locator("govee-music-profile-editor");
+    const palette = page.locator("govee-palette-editor");
+    await expect(palette).toBeVisible();
+    expect(await editor.evaluate(el => (el as GoveeMusicProfileEditor).content!.palette)).toBeUndefined();
+    await palette.getByRole("button", {name: "Add colour", exact: true}).click();
+    expect(await editor.evaluate(el => (el as GoveeMusicProfileEditor).content!.palette?.length)).toBe(3);
+    await page.getByText("Music colours", {exact: true}).click();
+    for (let i = 3; i < 8; i++) {
+      await palette.getByRole("button", {name: "Add colour", exact: true}).click();
+      await page.getByText("Music colours", {exact: true}).click();
+    }
+    await expect(palette.getByRole("button", {name: "Add colour", exact: true})).toBeHidden();
+    await page.getByRole("button", {name: "Use default colours"}).click();
+    expect(await editor.evaluate(el => (el as GoveeMusicProfileEditor).content!.palette)).toBeUndefined();
+    await expect(palette.getByRole("button", {name: "Add colour", exact: true})).toBeVisible();
+    await editor.evaluate(el => { (el as GoveeMusicProfileEditor).disabled = true; });
+    await expect(palette.getByRole("button", {name: "Add colour", exact: true})).toBeDisabled();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+}
+
+test("unqualified music palette is not editable", async ({ page }) => {
+  await page.goto("/tests/browser/fixtures/music-profile-editor.html?unknown");
+  await expect(page.locator("govee-palette-editor")).toBeHidden();
+});
 
 test("music controls use variant defaults and bounds", async ({ page }) => {
   await page.setViewportSize({width: 1280, height: 900});

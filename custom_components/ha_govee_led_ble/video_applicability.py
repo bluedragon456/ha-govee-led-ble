@@ -25,6 +25,7 @@ def video_control_states(profile: ModelProfile, identity: object) -> dict[str, C
             ("white_balance", profile.supports_white_balance),
             ("relative_brightness", profile.supports_relative_brightness),
             ("blank_screen", profile.supports_blank_screen),
+            ("black_border", profile.supports_black_border),
         )
     }
     for condition in profile.video_firmware_conditions:
@@ -53,6 +54,7 @@ def requested_video_controls(content: Any) -> frozenset[str]:
             ),
             ("relative_brightness", content.relative_brightness is not None),
             ("blank_screen", content.blank_screen is not None),
+            ("black_border", content.black_border is not None),
         )
         if requested
     )
@@ -67,4 +69,6 @@ def require_video_controls(profile: ModelProfile, identity: object, controls: It
 
 def validate_video_request(coordinator: Any, content: object) -> None:
     if isinstance(content, VideoProfile):
+        if content.saturation is not None:
+            coordinator.profile.validate_video_saturation(content.saturation)
         require_video_controls(coordinator.profile, coordinator, requested_video_controls(content))
