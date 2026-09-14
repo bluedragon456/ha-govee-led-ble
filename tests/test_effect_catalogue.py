@@ -1,10 +1,13 @@
 """Model-aware Effect Studio catalogue contracts."""
 
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
 
 from custom_components.ha_govee_led_ble.const import MODEL_PROFILES, MUSIC_MODE_SLUGS
+from custom_components.ha_govee_led_ble.coordinator_expectations import expectations_from_packet
+from custom_components.ha_govee_led_ble.coordinator_status import ParsedMode
 from custom_components.ha_govee_led_ble.effect_catalogue import (
     EFFECT_STUDIO_CATALOGUE_SCHEMA_VERSION,
     H617A_CATALOGUE_TEMPLATES,
@@ -19,6 +22,7 @@ from custom_components.ha_govee_led_ble.effect_catalogue import (
     LEGACY_CATALOGUE_SKU,
     MODEL_EFFECT_CATALOGUES,
     WORKSHOP_PROTOCOL_FIXTURES,
+    _single_template,
     custom_effect_catalogue_payload,
     resolve_catalogue_template,
     validate_catalogue_template_identity,
@@ -39,8 +43,21 @@ from custom_components.ha_govee_led_ble.effect_contracts import (
     studio_apply_capability_state,
     workflow_capability_state,
 )
-from custom_components.ha_govee_led_ble.effect_domain import JsonValue, MusicProfile, SingleEffect
+from custom_components.ha_govee_led_ble.effect_domain import (
+    EffectPair,
+    JsonValue,
+    LibraryItem,
+    MultiEffect,
+    MusicProfile,
+    PaintedEffect,
+    PaletteDiyEffect,
+    SingleEffect,
+    TargetHint,
+)
+from custom_components.ha_govee_led_ble.effect_websocket_payloads import item_summary
 from custom_components.ha_govee_led_ble.generated_protocol.diy_type03 import DiyType03
+from custom_components.ha_govee_led_ble.generated_protocol_adapter import build_h617a_scene, build_h6199_scene
+from custom_components.ha_govee_led_ble.scenes import MODEL_SCENES
 
 
 def test_model_aware_catalogue_includes_supported_models_and_legacy_h617a_view() -> None:
@@ -401,3 +418,61 @@ def test_catalogue_template_identity_rejects_cross_template_content() -> None:
             canonical.id,
             MusicProfile("H617A", "rhythm", 99),
         )
+
+
+@pytest.mark.parametrize("grammar", ["H617A", "H6199", None, "unknown"])
+def test_single_template_requires_effect_grammar_without_granting_catalogue(monkeypatch, grammar):
+    model = "H7000"
+    monkeypatch.setitem(
+        MODEL_PROFILES, model, replace(MODEL_PROFILES["H617A"], effect_grammar=grammar, scene_catalogue_sku=None)
+    )
+    family = H617A_TYPE04_FAMILIES[0]
+    if grammar in {"H617A", "H6199"}:
+        content = _single_template(model, family).content
+        assert isinstance(content, SingleEffect if grammar == "H617A" else PaletteDiyEffect)
+        if isinstance(content, PaletteDiyEffect):
+            assert content.model == model
+    else:
+        with pytest.raises(ValueError, match="no supported single-effect grammar"):
+            _single_template(model, family)
+    assert model not in cast(dict[str, JsonValue], custom_effect_catalogue_payload()["models"])
+    with pytest.raises(ValueError, match="no custom-effect catalogue"):
+        resolve_catalogue_template(model, "template:single:0:0")
+
+
+@pytest.mark.parametrize("model", [None, "H617A", "H617E", "H6199", "H6076", "H7000", "unknown"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        PaintedEffect("clockwise", 50, 100, (None,) * 15),
+        SingleEffect(0, 0, 50, ((255, 0, 0),)),
+        MultiEffect((EffectPair(0, 0),), 50, ((255, 0, 0),)),
+    ],
+)
+def test_basic_item_summary_preserves_admitted_target_without_product_substitution(monkeypatch, model, content):
+    monkeypatch.setitem(MODEL_PROFILES, "H7000", replace(MODEL_PROFILES["H617A"], scene_catalogue_sku=None))
+    item = LibraryItem.new("Basic effect", content, target_hint=TargetHint(model) if model else None)
+    summary = item_summary(item)
+    if model == "unknown":
+        assert "model" not in summary
+    else:
+        assert summary["model"] == (model or "H617A")
+
+
+@pytest.mark.parametrize("grammar,build", [("H617A", build_h617a_scene), ("H6199", build_h6199_scene)])
+@pytest.mark.parametrize("model", ["catalogue", "H7000"])
+def test_scene_expectations_preserve_wire_selector_without_requiring_catalogue(monkeypatch, grammar, build, model):
+    monkeypatch.setitem(
+        MODEL_PROFILES,
+        "H7000",
+        replace(MODEL_PROFILES[grammar], supports_scenes=False, scene_catalogue_sku=None),
+    )
+    name, scene = next(iter(MODEL_SCENES[grammar].items()))
+    target = grammar if model == "catalogue" else model
+    expected_name = name if model == "catalogue" else None
+    assert expectations_from_packet(build(scene.code), target) == {
+        "color_mode": (ParsedMode.SCENE, None),
+        "scene_code": scene.code,
+        "effect": expected_name,
+        "unknown_scene_code": scene.code if expected_name is None else None,
+    }

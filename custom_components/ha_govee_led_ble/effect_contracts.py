@@ -377,6 +377,29 @@ def release_capability(model: str, workflow: CapabilityWorkflow) -> ReleaseCapab
     )
 
 
+def require_effect_route(
+    model: str, workflow: CapabilityWorkflow, grammars: tuple[str, ...] = ("H617A", "H6199")
+) -> str:
+    """Require exact-model workflow authorization and matching effect/command grammar."""
+    capability = release_capability(model, workflow)
+    label = "Workshop" if workflow is CapabilityWorkflow.WORKSHOP else workflow.value
+    if capability is None or capability.application_route not in {
+        ApplicationRoute.STUDIO_SCENE_APPLY
+        if workflow is CapabilityWorkflow.NATIVE_SCENES
+        else ApplicationRoute.STUDIO_CUSTOM_APPLY,
+        ApplicationRoute.HOME_ASSISTANT_CONTROL,
+    }:
+        raise ValueError(f"{model} {label} application is not supported")
+    profile = get_profile(model)
+    if (
+        profile.effect_grammar is None
+        or profile.effect_grammar not in grammars
+        or profile.command_grammar != profile.effect_grammar
+    ):
+        raise ValueError(f"{model} has no supported {label} grammar and activation route")
+    return profile.effect_grammar
+
+
 def frontend_release_capabilities(model: str) -> list[JsonValue]:
     return [
         capability.to_frontend_dict()

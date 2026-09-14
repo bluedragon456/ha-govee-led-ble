@@ -17,22 +17,17 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant
 
-from .const import DOMAIN, get_profile, protocol_model
+from .const import DOMAIN, ReadDomain
 from .control_arbiter import ControlIntent, PreviewAdmission, async_control_intent
 from .coordinator_status import ParsedMode
 from .effect_active_workspace import ActiveEffectWorkspace, ActiveEffectWorkspaceRepository
 from .effect_catalogue import (
-    H6199_PALETTE_DIY_APPLY_CODE,
-    H6199_WORKSHOP_APPLY_CODE,
     validate_catalogue_template_identity,
 )
 from .effect_compiler import (
-    ActivationMode,
     CompatibilityState,
     CompiledApplication,
     CompiledEffect,
-    CompiledMusicProfile,
-    CompiledVideoProfile,
     compatibility,
     compile_application,
 )
@@ -55,8 +50,10 @@ from .effect_protocol_decoder import (
     decode_a3_effect_frames,
 )
 from .effect_runtime import (
+    active_workspace_matches,
     async_apply_compiled_profile,
-    observable_signature_for_state,
+    compiled_observation,
+    observable_signature_for_compiled,
     resolve_diy_code,
 )
 from .effect_scene_defaults import NativeSceneDefaultRepository
@@ -70,7 +67,6 @@ from .effect_scenes import (
 )
 from .effect_template_defaults import CatalogueTemplateDefault, CatalogueTemplateDefaultRepository
 from .generated_protocol_adapter import build_power
-from .h6199_calibration import WHITE_BALANCE_POSITIONS
 from .native_scenes import encode_authored_scene_body, resolve_native_scene_body
 from .scenes import canonical_scene_key, scene_code_is_ambiguous
 
@@ -474,7 +470,7 @@ class EffectPreviewManager:
                 item.origin.source_id,
                 item.content,
             )
-        diy_code = resolve_diy_code(item)
+        diy_code = resolve_diy_code(item, model=coordinator.model)
         fingerprint = _snapshot_fingerprint(coordinator.model, item)
         request = _PreviewRequest(
             session_id=session_id,
@@ -488,7 +484,7 @@ class EffectPreviewManager:
             content_kind=str(effect_content_to_dict(item.content)["kind"]),
             item=item,
             diy_code=diy_code,
-            default_action=(_snapshot_default_action(item) if persist_default else None),
+            default_action=(_snapshot_default_action(item, coordinator.model) if persist_default else None),
         )
         return await self._async_accept(owner, request)
 
@@ -895,7 +891,7 @@ class EffectPreviewManager:
         if expectations is not None:
             self._health_targets[request.config_entry_id] = _HealthTarget(
                 expectations=dict(expectations),
-                confirmed_confidence=_confirmed_confidence(request, compiled),
+                confirmed_confidence=_confirmed_confidence(request, compiled, coordinator),
             )
         writer: _PreviewWriter | None = None
         try:
@@ -1021,18 +1017,8 @@ class EffectPreviewManager:
             return
 
         if request.item is not None and self._active_workspaces is not None:
-            signature = (
-                f"scene-code:{compiled.diy_code}"
-                if isinstance(compiled, CompiledEffect)
-                and compiled.activation_mode is ActivationMode.SCENE
-                and compiled.diy_code is not None
-                else observable_signature_for_state(
-                    coordinator,
-                    mode=_active_mode_for_workspace(coordinator),
-                    diy_code=coordinator.diy_code,
-                    effect=coordinator.effect,
-                )
-            )
+            assert compiled is not None
+            signature = observable_signature_for_compiled(compiled)
             if signature is not None:
                 self._active_workspaces.set(
                     ActiveEffectWorkspace(
@@ -1105,7 +1091,7 @@ class EffectPreviewManager:
                         request,
                         coordinator,
                         expectations,
-                        _confirmed_confidence(request, compiled),
+                        _confirmed_confidence(request, compiled, coordinator),
                     ),
                     name=f"{DOMAIN} preview verify {request.config_entry_id}",
                 )
@@ -1283,6 +1269,7 @@ class EffectPreviewManager:
                     and request.item is not None
                     and workspace.updated_at == request.updated_at
                     and workspace.selector_label == request.item.name
+                    and active_workspace_matches(coordinator, workspace)
                 ):
                     self._active_workspaces.update_confidence(
                         request.config_entry_id,
@@ -1537,7 +1524,7 @@ class EffectPreviewManager:
         coordinator: Any,
         expectations: Mapping[str, Any],
     ) -> bool | None:
-        result = await coordinator.async_preview_observe(
+        result = await coordinator.async_observe_effect(
             expectations,
             timeout=self._verify_timeout,
         )
@@ -1604,21 +1591,6 @@ def _active_workspace_content(
     return decoded if type(decoded) is type(source) else source
 
 
-def _active_mode_for_workspace(coordinator: Any) -> str:
-    mode = getattr(coordinator, "active_mode", None)
-    if isinstance(mode, str):
-        return mode
-    if getattr(coordinator, "diy_code", None) is not None:
-        return "custom"
-    if getattr(coordinator, "effect", None) is not None:
-        return "scene"
-    if getattr(coordinator, "music_mode", None) not in {None, "off"}:
-        return "music"
-    if getattr(coordinator, "video_mode", None) not in {None, "off"}:
-        return "video"
-    return "colour"
-
-
 def _preview_scene_identity(
     request: _PreviewRequest,
 ) -> tuple[int | None, int | None]:
@@ -1644,7 +1616,7 @@ def _scene_default_action(
     return "reset" if canonical_body == catalogue_body and speed_index == catalogue_speed else "set"
 
 
-def _snapshot_default_action(item: LibraryItem) -> str | None:
+def _snapshot_default_action(item: LibraryItem, model: str) -> str | None:
     if isinstance(item.content, PaletteScene | LayeredScene):
         scene = resolve_scene(
             item.content.template.sku,
@@ -1662,7 +1634,6 @@ def _snapshot_default_action(item: LibraryItem) -> str | None:
         )
     if item.origin.kind is not SourceKind.CATALOGUE_TEMPLATE or item.origin.source_id is None:
         return None
-    model = getattr(item.content, "model", "H617A")
     template = validate_catalogue_template_identity(
         model,
         item.origin.source_id,
@@ -1674,12 +1645,14 @@ def _snapshot_default_action(item: LibraryItem) -> str | None:
 def _install_effect_state(coordinator: Any, compiled: CompiledEffect) -> None:
     if compiled.activation_packet is None:
         return
-    if compiled.activation_mode is ActivationMode.SCENE:
+    if compiled.selector_kind == "scene":
         coordinator.color_mode = ParsedMode.SCENE
         coordinator.effect = compiled.expected_effect
         coordinator._scene_code = compiled.diy_code
         coordinator.diy_code = None
     else:
+        coordinator.color_mode = ParsedMode.DIY
+        coordinator._scene_code = None
         coordinator.effect = None
         coordinator.diy_code = compiled.diy_code
     coordinator.music_mode = coordinator.video_mode = "off"
@@ -1690,7 +1663,7 @@ def _verification_expectations(
     request: _PreviewRequest,
     compiled: CompiledApplication | None,
 ) -> dict[str, Any] | None:
-    if not coordinator.profile.state_readable:
+    if not coordinator.profile.can_read(ReadDomain.POWER) or not coordinator.profile.supports_color_mode_readback:
         return None
     if request.scene is not None:
         scene_expectations: dict[str, Any] = {
@@ -1700,81 +1673,18 @@ def _verification_expectations(
         if scene_code_is_ambiguous(coordinator.model, request.scene.entry.code):
             scene_expectations["effect"] = canonical_scene_key(coordinator.model, request.scene.key)
         return scene_expectations
-    if isinstance(compiled, CompiledEffect):
-        if compiled.activation_mode is ActivationMode.SCENE:
-            compiled_expectations: dict[str, Any] = {
-                "is_on": True,
-                "scene_code": compiled.diy_code,
-            }
-            if (
-                compiled.diy_code is not None
-                and compiled.expected_effect is not None
-                and scene_code_is_ambiguous(compiled.model, compiled.diy_code)
-            ):
-                compiled_expectations["effect"] = canonical_scene_key(compiled.model, compiled.expected_effect)
-            return compiled_expectations
-        if compiled.content_kind == "workshop":
-            return {"is_on": True, "unknown_scene_code": compiled.diy_code}
-        if protocol_model(compiled.model) == "H617A":
-            return {"is_on": True, "diy_code": compiled.diy_code}
-        if compiled.diy_code in {H6199_PALETTE_DIY_APPLY_CODE, H6199_WORKSHOP_APPLY_CODE}:
-            return {"is_on": True, "unknown_scene_code": compiled.diy_code}
-        return None
-    if isinstance(compiled, CompiledMusicProfile):
-        expectations: dict[str, Any] = {
-            "is_on": True,
-            "music_mode": compiled.mode,
-        }
-        if compiled.model == "H6199":
-            expectations.update(
-                {
-                    "music_sensitivity": compiled.sensitivity,
-                    "music_color": compiled.colour,
-                }
-            )
-            if compiled.mode == "rhythm":
-                expectations["music_calm"] = compiled.calm
-        return expectations
-    if isinstance(compiled, CompiledVideoProfile):
-        profile = get_profile(compiled.model)
-        video_expectations: dict[str, Any] = {
-            "is_on": True,
-            "video_mode": compiled.mode,
-        }
-        if profile.supports_video_capture_region:
-            video_expectations["video_full_screen"] = compiled.full_screen
-        if profile.supports_video_saturation:
-            video_expectations["video_saturation"] = compiled.saturation
-        if profile.supports_video_sound_effects:
-            video_expectations["video_sound_effects"] = compiled.sound_effects
-            video_expectations["video_sound_effects_softness"] = compiled.sound_effects_softness
-        if profile.supports_white_balance:
-            if compiled.white_balance_position is None:
-                raise ValueError("video profile is missing white balance")
-            red, blue = WHITE_BALANCE_POSITIONS[compiled.white_balance_position - 1]
-            video_expectations["white_balance_red"] = red
-            video_expectations["white_balance_blue"] = blue
-        if profile.supports_relative_brightness:
-            if compiled.relative_brightness is None:
-                raise ValueError("video profile is missing relative brightness")
-            left, top, right, bottom = compiled.relative_brightness
-            video_expectations["relative_brightness"] = left if len(set(compiled.relative_brightness)) == 1 else None
-            video_expectations["relative_brightness_left"] = left
-            video_expectations["relative_brightness_top"] = top
-            video_expectations["relative_brightness_right"] = right
-            video_expectations["relative_brightness_bottom"] = bottom
-        if profile.supports_blank_screen:
-            video_expectations["blank_screen"] = compiled.blank_screen
-        return video_expectations
-    return None
+    return None if compiled is None else compiled_observation(compiled, profile=coordinator.profile)[0]
 
 
 def _confirmed_confidence(
     request: _PreviewRequest,
     compiled: CompiledApplication | None,
+    coordinator: Any,
 ) -> ObservationConfidence:
-    if request.scene is not None or isinstance(compiled, CompiledEffect):
+    if request.scene is not None:
         return ObservationConfidence.ACTIVATION_MATCH
-    if isinstance(compiled, CompiledMusicProfile) and protocol_model(compiled.model) == "H617A":
-        return ObservationConfidence.MODE_MATCH
-    return ObservationConfidence.SETTINGS_MATCH
+    return (
+        ObservationConfidence.UNKNOWN
+        if compiled is None
+        else compiled_observation(compiled, profile=coordinator.profile)[1]
+    )

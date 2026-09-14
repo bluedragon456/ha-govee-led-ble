@@ -28,7 +28,15 @@ from custom_components.ha_govee_led_ble.coordinator import (
 from custom_components.ha_govee_led_ble.coordinator_expectations import expectations_from_packet
 from custom_components.ha_govee_led_ble.coordinator_status import ParsedMode
 from custom_components.ha_govee_led_ble.effect_commands import build_h617a_diy_activation
-from custom_components.ha_govee_led_ble.effect_deployments import PriorControlState
+from custom_components.ha_govee_led_ble.effect_compiler import compile_effect
+from custom_components.ha_govee_led_ble.effect_deployments import (
+    DeploymentPhase,
+    EffectDeploymentRepository,
+    ObservationConfidence,
+    PriorControlState,
+)
+from custom_components.ha_govee_led_ble.effect_domain import BuiltinScene, CatalogueRef, LibraryItem, SingleEffect
+from custom_components.ha_govee_led_ble.effect_runtime import EffectDeploymentEngine
 from custom_components.ha_govee_led_ble.generated_protocol_adapter import (
     H6199StatusReply,
     StatusReply,
@@ -66,6 +74,7 @@ from custom_components.ha_govee_led_ble.light_commands import (
 from custom_components.ha_govee_led_ble.native_scenes import build_native_scene_packets
 from custom_components.ha_govee_led_ble.scenes import MODEL_SCENES, SCENES
 from custom_components.ha_govee_led_ble.transport import WRITE_UUID, xor_checksum
+from tests.storage_test_double import InMemoryVersionedDocumentStore
 
 M = "custom_components.ha_govee_led_ble.coordinator"
 _CONFIGURATION_URL = "homeassistant://ha-govee-led-ble/editor/test-entry"
@@ -352,7 +361,10 @@ async def test_restore_effect_control_state_reapplies_powered_off_state(coord):
     refresh.assert_awaited_once_with(expected_on=False)
 
 
-async def test_restore_effect_control_state_reactivates_unmodified_diy_slot(coord):
+@pytest.mark.parametrize("model", ["H617A", "H9999"])
+async def test_restore_effect_control_state_reactivates_unmodified_diy_slot(coord, monkeypatch, model):
+    monkeypatch.setitem(MODEL_PROFILES, model, coord.profile)
+    coord.model = model
     state = PriorControlState(
         mode="custom",
         is_on=True,
@@ -363,7 +375,7 @@ async def test_restore_effect_control_state_reactivates_unmodified_diy_slot(coor
 
     with (
         patch.object(coord, "send_command", new_callable=AsyncMock) as send,
-        patch.object(coord, "refresh_state", new_callable=AsyncMock, return_value=True) as refresh,
+        patch.object(coord, "async_observe_effect", new_callable=AsyncMock, return_value=True) as refresh,
     ):
         recovered = await coord.async_restore_effect_control_state(
             state,
@@ -372,7 +384,7 @@ async def test_restore_effect_control_state_reactivates_unmodified_diy_slot(coor
 
     assert recovered is True
     send.assert_awaited_once_with(proto.build_h617a_diy_activation(700))
-    refresh.assert_awaited_once_with()
+    refresh.assert_awaited_once_with({"is_on": True, "diy_code": 700})
     assert coord.diy_code == 700
 
 
@@ -2345,15 +2357,16 @@ async def test_native_scene_power_state_waits_for_atomic_sequence(coord):
     assert coord.is_on is False
 
 
-async def test_preview_observation_stays_read_only_when_device_is_silent(coord):
+@pytest.mark.parametrize("expectations", [{"effect": "glacier"}, {"scene_code": SCENES["glacier"].code}])
+async def test_preview_observation_stays_read_only_when_device_is_silent(coord, expectations):
     coord._client = MagicMock(is_connected=True)
     with (
         patch.object(coord, "_send_state_queries", new=AsyncMock(return_value=True)) as query,
         patch.object(coord, "_disconnect_if_current", new_callable=AsyncMock) as disconnect,
         patch.object(coord, "send_command", new_callable=AsyncMock) as send,
     ):
-        result = await coord.async_preview_observe(
-            {"effect": "glacier"},
+        result = await coord.async_observe_effect(
+            expectations,
             timeout=0.05,
         )
 
@@ -2369,6 +2382,7 @@ async def test_preview_observation_stays_read_only_when_device_is_silent(coord):
     )
     disconnect.assert_not_awaited()
     send.assert_not_awaited()
+    assert not coord._control_lock.locked()
 
 
 async def test_preview_preflight_retries_one_failed_connection_path(coord):
@@ -2468,20 +2482,45 @@ async def test_preview_preflight_timeout_includes_foreground_wait(coord):
     await foreground
 
 
-async def test_preview_observation_confirms_diy_code_readback(coord):
+@pytest.mark.parametrize("selector", ["diy_code", "scene_code"])
+@pytest.mark.parametrize(
+    ("replies", "expected"),
+    [
+        ("none", None),
+        ("power", None),
+        ("selector", None),
+        ("both", True),
+        ("mismatch", False),
+        ("selector_mismatch", False),
+        ("power_mismatch", False),
+        ("wrong_mode", False),
+        ("suppressed_mode", None),
+        ("stale_mode", None),
+    ],
+)
+@pytest.mark.parametrize("intent", [ControlIntent.PREVIEW, ControlIntent.APPLY])
+async def test_effect_observation_requires_fresh_selector_and_power(coord, selector, replies, expected, intent):
     coord._client = MagicMock(is_connected=True)
+    mode = proto.COLOR_MODE_DIY if selector == "diy_code" else proto.COLOR_MODE_SCENE
+    coord._notify_callback(None, bytearray(proto.build_packet(0xAA, 0x01, [1])))
+    coord._notify_callback(None, bytearray(proto.build_packet(0xAA, 0x05, [mode, 24, 0])))
+    wrong_mode = bytearray(proto.build_packet(0xAA, 0x05, [proto.COLOR_MODE_STATIC, 0]))
+    if replies == "stale_mode":
+        coord._notify_callback(None, wrong_mode)
+    elif replies == "suppressed_mode":
+        coord._arm_expected_values({"color_mode": (coord.color_mode, coord.diy_code)})
 
     async def query(**_kwargs) -> bool:
-        coord._notify_callback(
-            None,
-            bytearray(
-                proto.build_packet(
-                    0xAA,
-                    0x05,
-                    [proto.COLOR_MODE_DIY, 0x18, 0x00],
-                )
-            ),
-        )
+        assert coord._control_arbiter.current_task_intent == intent
+        loop = asyncio.get_running_loop()
+        if replies in {"power", "both", "mismatch", "power_mismatch", "suppressed_mode", "stale_mode"}:
+            power = 0 if replies == "power_mismatch" else 1
+            loop.call_soon(coord._notify_callback, None, bytearray(proto.build_packet(0xAA, 0x01, [power])))
+        if replies in {"selector", "both", "mismatch", "selector_mismatch"}:
+            code = 25 if replies in {"mismatch", "selector_mismatch"} else 24
+            loop.call_soon(coord._notify_callback, None, bytearray(proto.build_packet(0xAA, 0x05, [mode, code, 0])))
+        if replies in {"wrong_mode", "suppressed_mode"}:
+            loop.call_soon(coord._notify_callback, None, wrong_mode)
         return True
 
     with patch.object(
@@ -2489,36 +2528,130 @@ async def test_preview_observation_confirms_diy_code_readback(coord):
         "_send_state_queries",
         new=AsyncMock(side_effect=query),
     ) as sent:
-        result = await coord.async_preview_observe(
-            {"diy_code": 24},
-            timeout=0.2,
-        )
+        async with coord._control_arbiter.hold(intent):
+            result = await coord.async_observe_effect({"is_on": True, selector: 24}, timeout=0.01)
 
-    assert result is True
+    assert result is expected
     sent.assert_awaited_once()
+    assert not coord._control_lock.locked()
 
 
-async def test_preview_observation_does_not_repeat_silent_query(coord):
-    coord._client = MagicMock(is_connected=True)
-    coord.effect = None
+@pytest.mark.parametrize(
+    ("selector", "actual", "final_desired"),
+    [
+        ("diy_code", [proto.COLOR_MODE_SCENE, 0x74, 0x08], True),
+        ("scene_code", [proto.COLOR_MODE_DIY, 24, 0], True),
+        ("scene_code", [proto.COLOR_MODE_STATIC, 0], True),
+        ("diy_code", [proto.COLOR_MODE_SCENE, 0x74, 0x08], False),
+        ("diy_code", None, False),
+    ],
+    ids=["diy-to-scene", "scene-to-diy", "scene-to-static", "persistent-wrong", "silence"],
+)
+async def test_deployment_retries_activation_after_fresh_wrong_mode(coord, selector, actual, final_desired):
+    scene = MODEL_SCENES[coord.model]["aurora"]
+    item = LibraryItem.new(
+        "Retry",
+        SingleEffect(0, 0, 50, ((255, 0, 0),))
+        if selector == "diy_code"
+        else BuiltinScene(CatalogueRef(coord.model, scene.scene_id, scene.effect_id)),
+    )
+    compiled = compile_effect(item, coord.model, diy_code=24 if selector == "diy_code" else None)
+    assert compiled.upload_packets
+    assert compiled.diy_code is not None
+    repository = EffectDeploymentRepository(InMemoryVersionedDocumentStore())
+    await repository.async_load()
+    engine = EffectDeploymentEngine(repository)
+    record = replace(
+        engine._new_record(
+            compiled,
+            config_entry_id="entry-a",
+            updated_at="2026-08-26T00:00:00Z",
+            operation_id=None,
+            source_item=item,
+            source_kind="saved_effect",
+        ),
+        phase=DeploymentPhase.VERIFYING,
+        progress_current=compiled.progress_total,
+    )
+    await repository.async_put(record, expected_version=None)
+    client = _c(write_gatt_char=AsyncMock())
+    coord._client = client
+    desired_mode = proto.COLOR_MODE_DIY if selector == "diy_code" else proto.COLOR_MODE_SCENE
+    desired = [desired_mode, compiled.diy_code & 0xFF, compiled.diy_code >> 8]
+    accepted_revisions = []
 
-    async def query_state(**_kwargs) -> bool:
+    async def query(**_kwargs) -> bool:
+        assert coord._control_arbiter.current_task_intent is ControlIntent.APPLY
+        assert sent.await_count <= (2 if actual is None else 4)
+        assert client.write_gatt_char.await_args_list == [
+            call(WRITE_UUID, packet, response=False)
+            for packet in (*compiled.packets, *((compiled.activation_packet,) if sent.await_count > 2 else ()))
+        ]
+        if actual is None:
+            return True
+        payload = desired if final_desired and sent.await_count > 2 else actual
+        baseline = coord._field_revisions.get("color_mode", 0)
+        coord._notify_callback(None, bytearray(proto.build_packet(0xAA, 0x01, [1])))
+        coord._notify_callback(None, bytearray(proto.build_packet(0xAA, 0x05, payload)))
+        accepted_revisions.append(coord._field_revisions.get("color_mode", 0) > baseline)
         return True
 
-    with patch.object(
-        coord,
-        "_send_state_queries",
-        new=AsyncMock(side_effect=query_state),
-    ) as query:
-        result = await coord.async_preview_observe(
-            {"scene_code": SCENES["glacier"].code},
-            timeout=0.05,
-        )
+    with (
+        patch.object(coord, "_send_state_queries", new=AsyncMock(side_effect=query)) as sent,
+        patch.object(coord, "async_observe_effect", wraps=coord.async_observe_effect) as observe,
+        patch.object(coord, "_reset_disconnect_timer"),
+    ):
+        async with coord._control_arbiter.hold(ControlIntent.APPLY):
+            await coord.async_write_effect_sequence(compiled.packets, intent=ControlIntent.APPLY)
+            assert "color_mode" in coord._expected_state
+            confirmed, confidence, current = await engine._async_verify(coord, compiled, record)
 
-    assert result is None
-    assert query.await_count == 1
-    assert query.await_args.kwargs["query_color_mode"] is True
-    assert not coord._control_lock.locked()
+    expected_revisions = (
+        [] if actual is None else ([False, True, True] if final_desired else [False, True, False, True])
+    )
+    assert accepted_revisions == expected_revisions
+    assert confirmed is final_desired
+    assert confidence is (ObservationConfidence.ACTIVATION_MATCH if final_desired else ObservationConfidence.UNKNOWN)
+    assert sent.await_count == observe.await_count == (2 if actual is None else len(expected_revisions))
+    assert all(observation.kwargs == {"timeout": 4.0} for observation in observe.await_args_list)
+    assert client.write_gatt_char.await_args_list == [
+        call(WRITE_UUID, packet, response=False)
+        for packet in (*compiled.packets, *((compiled.activation_packet,) if actual is not None else ()))
+    ]
+    assert repository.get(record.operation_id) == current
+    assert current.phase is DeploymentPhase.VERIFYING
+
+
+@pytest.mark.parametrize("effect", ["aurora-a", "racing game-a"])
+@pytest.mark.parametrize("power", [True, False])
+async def test_effect_observation_cannot_disambiguate_h617e_scene_aliases(coord, effect, power):
+    coord.model = "H617E"
+    coord.profile = MODEL_PROFILES[coord.model]
+    coord._client = _c()
+    scene_received = asyncio.Event()
+
+    async def query(**_kwargs) -> bool:
+        coord._notify_callback(None, bytearray(proto.build_packet(0xAA, 0x05, [proto.COLOR_MODE_SCENE, 0x74, 0x08])))
+        scene_received.set()
+        return True
+
+    with patch.object(coord, "_send_state_queries", new=AsyncMock(side_effect=query)) as sent:
+        observation = asyncio.create_task(
+            coord.async_observe_effect({"is_on": True, "scene_code": 2164, "effect": effect}, timeout=1.0)
+        )
+        try:
+            await asyncio.wait_for(scene_received.wait(), timeout=1.0)
+            assert coord.scene_code == 2164
+            assert coord.effect == "racing game-a"
+            assert not observation.done()
+            coord._notify_callback(None, bytearray(proto.build_packet(0xAA, 0x01, [int(power)])))
+            result = await observation
+        finally:
+            observation.cancel()
+            await asyncio.gather(observation, return_exceptions=True)
+
+    assert result is (None if power else False)
+    sent.assert_awaited_once()
 
 
 def test_notify_callback_rejected_frame_is_retained_without_address(h6199, caplog):
@@ -3027,7 +3160,7 @@ def test_segment_query_groups_are_model_bounded(model: str, maximum: int) -> Non
 def test_unknown_model_encoders_fail_closed() -> None:
     with pytest.raises(ValueError, match="music grammar"):
         build_music_mode(0x03, 50, None, False, "H9999")
-    with pytest.raises(ValueError, match="native-scene grammar"):
+    with pytest.raises(ValueError, match="scene activation grammar"):
         build_native_scene_packets("H9999", SCENES["rainbow"])
 
 

@@ -6,7 +6,7 @@ import base64
 from dataclasses import dataclass
 from typing import Final
 
-from .const import MODEL_PROFILES, MUSIC_MODE_SLUGS, ModelProfile, protocol_model
+from .const import MODEL_PROFILES, MUSIC_MODE_SLUGS, ModelProfile, get_profile
 from .effect_contracts import (
     CapabilityState,
     CapabilityWorkflow,
@@ -501,14 +501,15 @@ H6199_VIDEO_MODES: Final = _native_video_modes("H6199")
 def _single_template(model: str, family: DiyEffectFamily) -> CatalogueTemplate:
     variation = family.variations[0]
     content: EffectContent
-    if protocol_model(model) == "H617A":
+    grammar = get_profile(model).effect_grammar
+    if grammar == "H617A":
         content = SingleEffect(
             family=family.family,
             variant=variation.variant,
             speed=50,
             palette=DEFAULT_PALETTE,
         )
-    else:
+    elif grammar == "H6199":
         content = PaletteDiyEffect(
             model=model,
             family=family.family,
@@ -516,6 +517,8 @@ def _single_template(model: str, family: DiyEffectFamily) -> CatalogueTemplate:
             speed=50,
             palette=DEFAULT_PALETTE,
         )
+    else:
+        raise ValueError(f"{model} has no supported single-effect grammar")
     return CatalogueTemplate(
         id=f"template:single:{family.family}:{variation.variant}",
         label=family.label,

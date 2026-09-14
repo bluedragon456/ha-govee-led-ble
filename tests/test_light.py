@@ -33,6 +33,7 @@ from custom_components.ha_govee_led_ble.effect_domain import (
     BuiltinScene,
     CatalogueRef,
     EffectValidationError,
+    LayeredEffect,
     LibraryItem,
     MusicProfile,
     Origin,
@@ -69,8 +70,13 @@ from custom_components.ha_govee_led_ble.light_commands import (
 )
 from custom_components.ha_govee_led_ble.light_services import _SEGMENTS, async_register_light_services
 from custom_components.ha_govee_led_ble.native_scenes import build_native_scene_packets
-from custom_components.ha_govee_led_ble.scenes import MODEL_SCENE_LABELS, MODEL_SCENES, SCENES
+from custom_components.ha_govee_led_ble.scenes import MODEL_SCENE_LABELS, MODEL_SCENES, SCENE_ENTRIES, SCENES
 from tests.storage_test_double import InMemoryVersionedDocumentStore
+
+
+@pytest.fixture(autouse=True)
+def coordinator_scene_code(mock_coordinator):
+    mock_coordinator.scene_code = None
 
 
 @pytest.fixture
@@ -677,13 +683,16 @@ def test_active_saved_effect_uses_current_name_only_for_matching_content(
     assert entity.effect == "off"
 
     mock_coordinator.unknown_scene_code = 800
-    assert entity.effect == "Renamed effect"
+    mock_coordinator.scene_code = 800
+    assert entity.effect == "off"
 
     mock_coordinator.unknown_scene_code = None
+    mock_coordinator.scene_code = None
     mock_coordinator.diy_code = 800
 
     backend.active_workspaces.get.return_value = SimpleNamespace(
         model="H617A",
+        content=saved.content,
         observable_signature="custom:800",
     )
     assert entity.effect == "Custom"
@@ -701,9 +710,11 @@ def test_active_saved_effect_uses_current_name_only_for_matching_content(
     assert entity.effect == "off"
 
 
+@pytest.mark.parametrize("selector", ["diy", "scene"])
 async def test_workspace_identity_agrees_between_device_payload_and_light_effect(
     hass: HomeAssistant,
     mock_coordinator,
+    selector,
 ) -> None:
     deployments = EffectDeploymentRepository(InMemoryVersionedDocumentStore())
     cache = EffectDeviceCache(InMemoryVersionedDocumentStore())
@@ -747,9 +758,9 @@ async def test_workspace_identity_agrees_between_device_payload_and_light_effect
     )
     active_workspaces.set(workspace)
     mock_coordinator.is_on = True
-    mock_coordinator.diy_code = None
+    mock_coordinator.diy_code = 24 if selector == "diy" else None
+    mock_coordinator.scene_code = 24 if selector == "scene" else None
     mock_coordinator.effect = None
-    mock_coordinator.unknown_scene_code = 24
     mock_coordinator.effect_categories = frozenset({"custom", "scenes"})
     engine = EffectDeploymentEngine(deployments, cache, active_workspaces)
     observed = engine.reconcile_current(
@@ -785,11 +796,16 @@ async def test_workspace_identity_agrees_between_device_payload_and_light_effect
 
     assert observed.active_effect is None
     assert payload["active_state"]["active_effect"] is None
-    assert payload["active_workspace"]["selector_label"] == "Flow"
-    assert entity.effect == "Custom"
-    assert entity.effect_list[:2] == ["off", "Custom"]
+    if selector == "diy":
+        assert payload["active_workspace"]["selector_label"] == "Flow"
+        assert entity.effect == "Custom"
+        assert entity.effect_list[:2] == ["off", "Custom"]
+    else:
+        assert payload["active_workspace"] is None
+        assert entity.effect == "off"
 
     mock_coordinator.unknown_scene_code = None
+    mock_coordinator.scene_code = None
     mock_coordinator.diy_code = 25
     engine.reconcile_current(
         mock_coordinator,
@@ -801,6 +817,81 @@ async def test_workspace_identity_agrees_between_device_payload_and_light_effect
 
     assert suspended_payload["active_workspace"] is None
     assert active_workspaces.get("entry-a") == workspace
+
+
+@pytest.mark.parametrize("signature", ["scene-code:2164", "scene:aurora"])
+@pytest.mark.parametrize("effect", ["aurora-a", "racing game-a"])
+@pytest.mark.parametrize("advanced", [False, True])
+async def test_ambiguous_workspace_agrees_across_runtime_light_and_device(
+    hass, mock_coordinator, monkeypatch, signature, effect, advanced
+):
+    deployments = EffectDeploymentRepository(InMemoryVersionedDocumentStore())
+    cache = EffectDeviceCache(InMemoryVersionedDocumentStore())
+    workspaces = ActiveEffectWorkspaceRepository(InMemoryVersionedDocumentStore())
+    await deployments.async_load()
+    await cache.async_load()
+    await workspaces.async_load()
+    legacy = next(scene for scene in SCENE_ENTRIES["H617A"] if scene.name == "Aurora")
+    monkeypatch.setitem(
+        MODEL_PROFILES,
+        "H617E",
+        replace(MODEL_PROFILES["H617E"], advanced_scene_carrier=(legacy.scene_id, legacy.effect_id)),
+    )
+    workspace = ActiveEffectWorkspace(
+        config_entry_id="entry-a",
+        model="H617E",
+        selector_label="Legacy Aurora",
+        content=LayeredEffect(())
+        if advanced
+        else BuiltinScene(CatalogueRef("H617A", legacy.scene_id, legacy.effect_id)),
+        origin=Origin(SourceKind.AUTHORED),
+        observable_signature=signature,
+        updated_at="2026-08-26T00:01:00Z",
+        generation=1,
+    )
+    workspaces.set(workspace)
+    record = DeploymentRecord(
+        operation_id=uuid4(),
+        config_entry_id="entry-a",
+        diy_code=legacy.code,
+        target_mode="scene",
+        target_effect="aurora" if effect == "aurora-a" else effect,
+        selector_label=effect,
+        source_kind="snapshot",
+        source_content_hash=workspace.content_hash,
+        phase=DeploymentPhase.CONFIRMED,
+        compiler_version=1,
+        artifact_sha256=sha256(b"scene").hexdigest(),
+        updated_at="2026-08-26T00:00:00Z",
+    )
+    await deployments.async_put(record, expected_version=None)
+    mock_coordinator.model = "H617E"
+    mock_coordinator.profile = MODEL_PROFILES["H617E"]
+    mock_coordinator.is_on = True
+    mock_coordinator.scene_code = legacy.code
+    mock_coordinator.effect = effect
+    engine = EffectDeploymentEngine(deployments, cache, workspaces)
+    observed = engine.reconcile_current(
+        mock_coordinator, config_entry_id="entry-a", observed_at="2026-08-26T00:02:00Z", refreshed=True
+    )
+    backend = SimpleNamespace(
+        application=SimpleNamespace(library_snapshot=lambda: LibrarySnapshot(())),
+        device_cache=cache,
+        active_workspaces=workspaces,
+        engine=engine,
+        preview=SimpleNamespace(health=MagicMock()),
+    )
+    entity = GoveeBLELight(mock_coordinator, config_entry_id="entry-a", effect_backend=backend)
+    entry = SimpleNamespace(entry_id="entry-a", runtime_data=mock_coordinator, title="H617E")
+    payload = _device_payload(hass, backend, entry)
+    matches = effect == "aurora-a"
+    assert (payload["active_workspace"] is not None) is matches
+    assert (entity.effect == "Custom") is matches
+    assert observed.mode == "scene"
+    assert observed.diy_code is None
+    if not matches:
+        assert observed.matched_operation_id == record.operation_id
+        assert workspaces.get("entry-a") == workspace
 
 
 def test_active_custom_remains_in_effect_list_when_categories_are_disabled(
@@ -820,6 +911,7 @@ def test_active_custom_remains_in_effect_list_when_categories_are_disabled(
                 get=MagicMock(
                     return_value=SimpleNamespace(
                         model="H617A",
+                        content=SingleEffect(0, 0, 50, ((255, 0, 0),)),
                         observable_signature="custom:24",
                     )
                 )
@@ -859,6 +951,7 @@ def test_active_custom_uses_the_advertised_namespace_for_saved_resolution(
                 get=MagicMock(
                     return_value=SimpleNamespace(
                         model="H617A",
+                        content=saved.content,
                         observable_signature="custom:24",
                     )
                 )
@@ -878,6 +971,7 @@ def test_active_custom_uses_the_advertised_namespace_for_saved_resolution(
 async def test_direct_colour_control_clears_active_workspace(mock_coordinator):
     workspace = SimpleNamespace(
         model="H617A",
+        content=SingleEffect(0, 0, 50, ((255, 0, 0),)),
         observable_signature="custom:24",
     )
     current_workspace = workspace
@@ -922,6 +1016,7 @@ async def test_direct_colour_control_clears_active_workspace(mock_coordinator):
 async def test_failed_foreground_control_preserves_active_workspace(mock_coordinator):
     workspace = SimpleNamespace(
         model="H617A",
+        content=SingleEffect(0, 0, 50, ((255, 0, 0),)),
         observable_signature="custom:24",
     )
     active_workspaces = MagicMock()
@@ -958,6 +1053,7 @@ async def test_custom_effect_selection_with_brightness_preserves_workspace(
 ):
     workspace = SimpleNamespace(
         model="H617A",
+        content=SingleEffect(0, 0, 50, ((255, 0, 0),)),
         observable_signature="custom:24",
     )
     active_workspaces = MagicMock()
@@ -993,6 +1089,7 @@ async def test_brightness_only_control_preserves_active_workspace(
 ):
     workspace = SimpleNamespace(
         model="H617A",
+        content=SingleEffect(0, 0, 50, ((255, 0, 0),)),
         observable_signature="custom:24",
     )
     active_workspaces = MagicMock()

@@ -21,6 +21,7 @@ from custom_components.ha_govee_led_ble.effect_compiler import (
     compile_effect,
     compile_h617a,
     compile_h6199,
+    resolve_diy_code,
 )
 from custom_components.ha_govee_led_ble.effect_contracts import (
     ApplicationRoute,
@@ -39,7 +40,6 @@ from custom_components.ha_govee_led_ble.effect_protocol_decoder import (
     UnsupportedA3EffectError,
     decode_a3_effect,
 )
-from custom_components.ha_govee_led_ble.effect_runtime import resolve_diy_code
 from custom_components.ha_govee_led_ble.generated_protocol.diy_type03 import DiyType03
 from custom_components.ha_govee_led_ble.generated_protocol.diy_type04 import DiyType04
 from custom_components.ha_govee_led_ble.generated_protocol.h6199_effect_upload import H6199EffectUpload
@@ -344,24 +344,45 @@ def test_basic_grammars_do_not_supply_effect_grammar(monkeypatch, model) -> None
         resolve_diy_code(item)
 
 
-@pytest.mark.parametrize("grammar", [None, "unknown"])
-def test_workshop_authorization_without_supported_grammar_is_rejected(monkeypatch, grammar) -> None:
-    item = LibraryItem.new("Workshop", WORKSHOP_PROTOCOL_FIXTURES[0].content("H617A"))
-    monkeypatch.setitem(MODEL_PROFILES, "H617A", replace(MODEL_PROFILES["H617A"], effect_grammar=grammar))
-    assert compatibility(item, "H617A").state is CompatibilityState.INCOMPATIBLE
+@pytest.mark.parametrize("field", ["effect_grammar", "command_grammar"])
+@pytest.mark.parametrize("grammar", [None, "unknown", "other"])
+@pytest.mark.parametrize(
+    ("model", "content"),
+    [
+        ("H617A", WORKSHOP_PROTOCOL_FIXTURES[0].content("H617A")),
+        ("H6199", WORKSHOP_PROTOCOL_FIXTURES[0].content("H6199")),
+        ("H617A", PAINTED_CONTENT),
+        ("H617A", SINGLE_CONTENT),
+        ("H617A", MULTI_CONTENT),
+        ("H6199", H6199_CONTENT),
+    ],
+)
+def test_custom_authorization_without_supported_grammar_pair_is_rejected(monkeypatch, model, content, field, grammar):
+    item = LibraryItem.new("Custom", content)
+    if grammar == "other":
+        grammar = "H6199" if model == "H617A" else "H617A"
+    monkeypatch.setitem(
+        MODEL_PROFILES,
+        model,
+        replace(
+            MODEL_PROFILES[model], **{field: grammar}, read_domains=frozenset(), setup_required_read_domains=frozenset()
+        ),
+    )
+    assert compatibility(item, model).state is CompatibilityState.INCOMPATIBLE
     with pytest.raises(ValueError, match="activation route"):
-        compile_effect(item, "H617A")
+        compile_effect(item, model, diy_code=800)
     with pytest.raises(ValueError, match="activation route"):
-        resolve_diy_code(item)
+        resolve_diy_code(item, model=model)
 
 
-def test_workshop_grammar_cannot_bypass_disabled_workflow(monkeypatch) -> None:
+@pytest.mark.parametrize("route", [ApplicationRoute.NONE, ApplicationRoute.STUDIO_SCENE_APPLY])
+def test_workshop_grammar_cannot_bypass_disabled_workflow(monkeypatch, route) -> None:
     item = LibraryItem.new("Workshop", WORKSHOP_PROTOCOL_FIXTURES[0].content("H617A"))
     monkeypatch.setattr(
         effect_contracts,
         "RELEASE_CAPABILITY_CONTRACT",
         tuple(
-            replace(capability, application_route=ApplicationRoute.NONE)
+            replace(capability, application_route=route)
             if capability.workflow is CapabilityWorkflow.WORKSHOP
             else capability
             for capability in effect_contracts.RELEASE_CAPABILITY_CONTRACT
@@ -387,10 +408,18 @@ def test_h617e_workshop_preserves_exact_identity_and_h617a_bytes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("grammar", "content"),
-    [("H617A", PAINTED_CONTENT), ("H617A", SINGLE_CONTENT), ("H617A", MULTI_CONTENT), ("H6199", H6199_CONTENT)],
+    ("grammar", "content", "workflow", "default_code"),
+    [
+        ("H617A", PAINTED_CONTENT, CapabilityWorkflow.PAINTED, 800),
+        ("H617A", SINGLE_CONTENT, CapabilityWorkflow.SINGLE, H617A_TYPE04_APPLY_CODE),
+        ("H617A", MULTI_CONTENT, CapabilityWorkflow.MULTI, H617A_TYPE04_APPLY_CODE),
+        ("H6199", H6199_CONTENT, CapabilityWorkflow.PALETTE_DIY, H6199_PALETTE_DIY_APPLY_CODE),
+    ],
 )
-def test_profile_grammar_selects_basic_canonical_semantics(monkeypatch, grammar, content) -> None:
+@pytest.mark.parametrize("disabled_route", [ApplicationRoute.NONE, ApplicationRoute.STUDIO_SCENE_APPLY])
+def test_profile_grammar_selects_basic_canonical_semantics(
+    monkeypatch, grammar, content, workflow, default_code, disabled_route
+) -> None:
     monkeypatch.setitem(MODEL_PROFILES, "H9999", ModelProfile("Synthetic", effect_grammar=grammar))
     item = LibraryItem.new("Reference", content)
     compiled = compile_effect(item, grammar, diy_code=800 if grammar == "H617A" else None)
@@ -402,6 +431,47 @@ def test_profile_grammar_selects_basic_canonical_semantics(monkeypatch, grammar,
             assert compatibility(LibraryItem.new("Decoded", expected), model).state is CompatibilityState.INCOMPATIBLE
     if grammar == "H617A":
         assert compile_effect(item, "H617E", diy_code=800).packets == compiled.packets
+
+    synthetic_content = replace(content, model="H9999") if isinstance(content, PaletteDiyEffect) else content
+    synthetic = LibraryItem.new("Synthetic", synthetic_content)
+    assert resolve_diy_code(item) == default_code
+    with pytest.raises(ValueError, match="application is not supported"):
+        resolve_diy_code(synthetic, model="H9999")
+    capability = release_capability(grammar, workflow)
+    assert capability is not None
+    monkeypatch.setattr(
+        effect_contracts,
+        "RELEASE_CAPABILITY_CONTRACT",
+        (*effect_contracts.RELEASE_CAPABILITY_CONTRACT, replace(capability, model="H9999")),
+    )
+    with pytest.raises(ValueError, match="activation route"):
+        compile_effect(synthetic, "H9999", diy_code=default_code)
+    monkeypatch.setitem(MODEL_PROFILES, "H9999", replace(MODEL_PROFILES["H9999"], command_grammar=grammar))
+    resolved = resolve_diy_code(synthetic, model="H9999")
+    qualified = compile_effect(synthetic, "H9999", diy_code=resolved)
+    reference = compile_effect(item, grammar, diy_code=default_code)
+    assert resolved == qualified.diy_code == default_code
+    assert qualified.model == "H9999"
+    assert qualified.packets == reference.packets
+    assert qualified.selector_kind == ("diy" if grammar == "H617A" else "scene")
+    assert qualified.activation_mode.value == "custom"
+    if grammar == "H6199":
+        assert qualified.activation_packet == H("33050491010200000000000000000000000000a0")
+        assert resolve_diy_code(synthetic) == default_code
+        with pytest.raises(ValueError, match="targets H9999"):
+            compile_effect(synthetic, "H6199")
+        with pytest.raises(ValueError, match="no evidenced activation packet"):
+            resolve_diy_code(synthetic, 402, model="H9999")
+    monkeypatch.setattr(
+        effect_contracts,
+        "RELEASE_CAPABILITY_CONTRACT",
+        tuple(
+            replace(capability, application_route=disabled_route) if capability.model == "H9999" else capability
+            for capability in effect_contracts.RELEASE_CAPABILITY_CONTRACT
+        ),
+    )
+    with pytest.raises(ValueError, match="application is not supported"):
+        compile_effect(synthetic, "H9999", diy_code=default_code)
 
 
 @pytest.mark.parametrize("effect", ["", "unknown", "Clockwise"])

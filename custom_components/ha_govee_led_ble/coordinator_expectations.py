@@ -70,7 +70,8 @@ def expectations_from_packet(
             return expectations
         if mode == "scene":
             scene_code = int(detail.scene_id)
-            expectations["effect"] = _SCENE_EFFECT_BY_MODEL_ID[model].get(scene_code)
+            expectations["scene_code"] = scene_code
+            expectations["effect"] = _SCENE_EFFECT_BY_MODEL_ID.get(model, {}).get(scene_code)
             expectations["unknown_scene_code"] = scene_code if expectations["effect"] is None else None
             return expectations
     elif operation == "multi":
@@ -90,7 +91,8 @@ def expectations_from_packet(
             return expectations
         if mode == "scene":
             scene_code = int(detail.code)
-            expectations["effect"] = _SCENE_EFFECT_BY_MODEL_ID[model].get(scene_code)
+            expectations["scene_code"] = scene_code
+            expectations["effect"] = _SCENE_EFFECT_BY_MODEL_ID.get(model, {}).get(scene_code)
             expectations["unknown_scene_code"] = scene_code if expectations["effect"] is None else None
             return expectations
     if (static := parse_static_write(packet, model)) and static.whole_strip:

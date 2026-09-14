@@ -12,19 +12,22 @@ from uuid import uuid4
 import pytest
 from homeassistant.core import HomeAssistant
 
-from custom_components.ha_govee_led_ble.const import MODEL_PROFILES
+from custom_components.ha_govee_led_ble.const import MODEL_PROFILES, ReadDomain, get_profile
 from custom_components.ha_govee_led_ble.effect_active_workspace import (
     ActiveEffectWorkspace,
     ActiveEffectWorkspaceRepository,
 )
 from custom_components.ha_govee_led_ble.effect_backend import EffectBackend
 from custom_components.ha_govee_led_ble.effect_catalogue import (
-    H617A_WORKSHOP_APPLY_CODE,
     H6199_PALETTE_DIY_APPLY_CODE,
-    H6199_WORKSHOP_APPLY_CODE,
     WORKSHOP_PROTOCOL_FIXTURES,
 )
-from custom_components.ha_govee_led_ble.effect_compiler import compile_effect, compile_h617a, compile_h6199
+from custom_components.ha_govee_led_ble.effect_compiler import (
+    compile_application,
+    compile_effect,
+    compile_h617a,
+    compile_h6199,
+)
 from custom_components.ha_govee_led_ble.effect_deployments import (
     DeploymentPhase,
     DeploymentRecord,
@@ -33,6 +36,8 @@ from custom_components.ha_govee_led_ble.effect_deployments import (
     PriorControlState,
 )
 from custom_components.ha_govee_led_ble.effect_domain import (
+    BuiltinScene,
+    CatalogueRef,
     LibraryItem,
     MusicProfile,
     Origin,
@@ -47,6 +52,9 @@ from custom_components.ha_govee_led_ble.effect_identity import EffectDeviceCache
 from custom_components.ha_govee_led_ble.effect_runtime import (
     EffectDeploymentEngine,
     _activation_matches,
+    compiled_observation,
+    observable_signature_for_compiled,
+    resolve_diy_code,
 )
 from custom_components.ha_govee_led_ble.generated_protocol_adapter import build_h6199_video, build_power
 from custom_components.ha_govee_led_ble.layered_scene_decoder import decode_catalogue_layered_scene
@@ -123,6 +131,7 @@ def _confirmed_saved_record(item: LibraryItem, *, diy_code: int = 24) -> Deploym
         artifact_sha256=sha256(item.content_hash.encode()).hexdigest(),
         updated_at="2026-08-26T00:00:00Z",
         target_mode="custom",
+        content_kind="h617a_single",
         source_kind="saved_effect",
         selector_label=item.name,
         source_origin_kind=item.origin.kind.value,
@@ -213,12 +222,91 @@ def _video_item() -> LibraryItem:
     )
 
 
+def test_compiled_observation_uses_read_domains_and_status_grammar() -> None:
+    music = compile_application(_music_item("H6199"), "H6199")
+    music = replace(music, colour=None)
+    expectations, confidence = compiled_observation(music)
+    assert expectations == {"is_on": True, "music_mode": "rolling", "music_sensitivity": 50, "music_color": None}
+    assert confidence is ObservationConfidence.SETTINGS_MATCH
+    profile = replace(get_profile("H6199"), status_grammar="H617A")
+    assert compiled_observation(music, profile=profile) == (
+        {"is_on": True, "music_mode": "rolling"},
+        ObservationConfidence.MODE_MATCH,
+    )
+    profile = replace(profile, read_domains=frozenset({ReadDomain.POWER}), setup_required_read_domains=frozenset())
+    assert compiled_observation(music, profile=profile) == (None, ObservationConfidence.UNKNOWN)
+    video = compile_application(_video_item(), "H6199")
+    expectations, confidence = compiled_observation(video)
+    assert expectations is not None
+    assert expectations["relative_brightness"] is None
+    assert expectations["relative_brightness_left"] == 20
+    assert expectations["relative_brightness_bottom"] == 50
+    assert confidence is ObservationConfidence.SETTINGS_MATCH
+    profile = replace(
+        get_profile("H6199"),
+        read_domains=frozenset({ReadDomain.POWER, ReadDomain.COLOUR_MODE}),
+        setup_required_read_domains=frozenset(),
+    )
+    expectations, _ = compiled_observation(video, profile=profile)
+    assert expectations is not None
+    assert not any(key.startswith(("white_balance", "relative_brightness", "blank_screen")) for key in expectations)
+
+
+async def test_profile_reconciliation_never_revives_settings_from_mode_only() -> None:
+    repository = EffectDeploymentRepository(InMemoryVersionedDocumentStore())
+    await repository.async_load()
+    record = replace(
+        _confirmed_saved_record(_music_item("H6199")),
+        target_mode="music",
+        content_kind="music_profile",
+        diy_code=None,
+        target_model="H6199",
+        observable_signature="music:rolling",
+        verification_confidence=ObservationConfidence.SETTINGS_MATCH,
+    )
+    await repository.async_put(record, expected_version=None)
+    coordinator = _profile_coordinator("H6199")
+    engine = EffectDeploymentEngine(repository)
+    for mode, expected in [("rhythm", None), ("rolling", record.operation_id)]:
+        coordinator.music_mode = mode
+        observed = engine.reconcile_current(
+            coordinator, config_entry_id="entry-a", observed_at="2026-08-26T00:02:00Z", refreshed=True
+        )
+        assert observed.matched_operation_id == expected
+        assert observed.confidence is (ObservationConfidence.MODE_MATCH if expected else ObservationConfidence.UNKNOWN)
+    legacy = replace(record, target_model=None, observable_signature=None)
+    await repository.async_put(legacy, expected_version=None)
+    observed = engine.reconcile_current(
+        coordinator, config_entry_id="entry-a", observed_at="2026-08-26T00:03:00Z", refreshed=True
+    )
+    assert observed.matched_operation_id is None
+
+
+async def test_partial_observation_does_not_confirm_or_repeat_activation(hass: HomeAssistant) -> None:
+    repository, cache = await _repositories(hass)
+    coordinator = _coordinator()
+    coordinator.diy_code = 800
+    coordinator.async_observe_effect = AsyncMock(return_value=None)
+    item = _item()
+    result = await EffectDeploymentEngine(repository, cache).async_apply_saved(
+        coordinator,
+        item,
+        config_entry_id="entry-a",
+        updated_at="2026-08-11T00:00:00Z",
+    )
+    assert result.phase is DeploymentPhase.UNCERTAIN
+    assert coordinator.async_observe_effect.await_count == 2
+    assert coordinator.send_command.await_args_list == [call(packet) for packet in compile_h617a(item, 800).packets]
+
+
 def _coordinator(*, readable: bool = True):
     coordinator = SimpleNamespace(
         _control_lock=asyncio.Lock(),
         address="AA:BB:CC:DD:EE:FF",
         model="H617A",
-        profile=SimpleNamespace(state_readable=readable),
+        profile=get_profile("H617A")
+        if readable
+        else replace(get_profile("H617A"), read_domains=frozenset(), setup_required_read_domains=frozenset()),
         is_on=True,
         brightness_pct=72,
         rgb_color=(1, 2, 3),
@@ -254,22 +342,19 @@ def _coordinator(*, readable: bool = True):
                 await progress(index)
 
     coordinator.async_write_effect_sequence = AsyncMock(side_effect=write_effect_sequence)
+
+    async def observe(expectations, *, timeout):
+        refreshed = await coordinator.refresh_state()
+        return refreshed and all(getattr(coordinator, field, None) == value for field, value in expectations.items())
+
+    coordinator.async_observe_effect = AsyncMock(side_effect=observe)
     return coordinator
 
 
 def _profile_coordinator(model: str):
     coordinator = _coordinator()
     coordinator.model = model
-    coordinator.profile = SimpleNamespace(
-        state_readable=True,
-        supports_video_mode=model == "H6199",
-        supports_video_capture_region=model == "H6199",
-        supports_video_saturation=model == "H6199",
-        supports_video_sound_effects=model == "H6199",
-        supports_white_balance=model == "H6199",
-        supports_relative_brightness=model == "H6199",
-        supports_blank_screen=model == "H6199",
-    )
+    coordinator.profile = get_profile(model)
     coordinator.video_full_screen = True
     coordinator.video_saturation = 88
     coordinator.video_sound_effects = False
@@ -314,7 +399,7 @@ def _confirm_on_call(coordinator, call_number: int, diy_code: int) -> None:
 def _confirm_scene_code_on_call(coordinator, call_number: int, scene_code: int) -> None:
     async def refresh() -> bool:
         if coordinator.refresh_state.await_count >= call_number:
-            coordinator.unknown_scene_code = scene_code
+            coordinator.scene_code = scene_code
         return True
 
     coordinator.refresh_state.side_effect = refresh
@@ -390,25 +475,34 @@ async def test_saved_effect_powers_on_before_committed_upload(
     ]
 
 
+@pytest.mark.parametrize("advanced", [False, True])
+@pytest.mark.parametrize("source", ["saved", "snapshot"])
 async def test_layered_scene_uses_shared_transaction_and_identity_verification(
     hass: HomeAssistant,
+    advanced,
+    source,
 ) -> None:
     repository, cache = await _repositories(hass)
     coordinator = _coordinator()
     entry = next(scene for scene in SCENE_ENTRIES["H617A"] if scene.scene_type == 2 and scene.param)
     content = decode_catalogue_layered_scene("H617A", entry)
     assert content is not None
-    item = LibraryItem.new("Layered scene", content)
+    item = LibraryItem.new("Layered scene", content.effect if advanced else content)
     compiled = compile_effect(item, "H617A")
 
     async def refresh() -> bool:
         if coordinator.refresh_state.await_count >= 2:
             coordinator.effect = compiled.expected_effect
+            coordinator.scene_code = compiled.diy_code
         return True
 
     coordinator.refresh_state.side_effect = refresh
 
-    result = await EffectDeploymentEngine(repository, cache).async_apply_saved(
+    workspaces = ActiveEffectWorkspaceRepository(InMemoryVersionedDocumentStore())
+    await workspaces.async_load()
+    engine = EffectDeploymentEngine(repository, cache, workspaces)
+    apply = engine.async_apply_saved if source == "saved" else engine.async_apply_snapshot
+    result = await apply(
         coordinator,
         item,
         config_entry_id="entry-a",
@@ -419,13 +513,17 @@ async def test_layered_scene_uses_shared_transaction_and_identity_verification(
     assert result.target_mode == "scene"
     assert result.target_effect == compiled.expected_effect
     assert result.verification_confidence is ObservationConfidence.ACTIVATION_MATCH
-    assert result.evidence_codes == (
-        "scene_payload_readback_unavailable",
-        "layered_field_semantics_uncalibrated",
-    )
+    assert result.evidence_codes == compiled.evidence_codes
     assert coordinator.send_command.await_args_list == [call(packet) for packet in compiled.packets]
     assert cache.get("entry-a").effect == compiled.expected_effect
     assert cache.get("entry-a").matched_operation_id == result.operation_id
+    observed = engine.reconcile_current(
+        coordinator, config_entry_id="entry-a", observed_at="2026-08-11T00:01:00Z", refreshed=True
+    )
+    assert observed.mode == "scene"
+    assert observed.diy_code is None
+    assert observed.effect == compiled.expected_effect
+    assert (workspaces.get("entry-a") is not None) is (source == "snapshot")
 
 
 async def test_h6199_layered_scene_uses_model_framing_and_identity_verification(
@@ -443,6 +541,7 @@ async def test_h6199_layered_scene_uses_model_framing_and_identity_verification(
     async def refresh() -> bool:
         if coordinator.refresh_state.await_count >= 2:
             coordinator.effect = compiled.expected_effect
+            coordinator.scene_code = compiled.diy_code
         return True
 
     coordinator.refresh_state.side_effect = refresh
@@ -890,6 +989,7 @@ async def test_reconciliation_matches_only_latest_confirmed_selector(
         config_entry_id="entry-a",
         diy_code=800,
         phase=DeploymentPhase.CONFIRMED,
+        content_kind="h617a_painted",
         compiler_version=1,
         artifact_sha256=sha256(b"confirmed").hexdigest(),
         updated_at="2026-08-11T00:00:00Z",
@@ -920,6 +1020,7 @@ async def test_reconciliation_matches_only_latest_confirmed_selector(
         config_entry_id="entry-a",
         diy_code=800,
         phase=DeploymentPhase.UNCERTAIN,
+        content_kind="h617a_painted",
         compiler_version=1,
         artifact_sha256=sha256(b"uncertain").hexdigest(),
         updated_at="2026-08-11T00:02:00Z",
@@ -974,7 +1075,7 @@ async def test_reconciliation_matches_scene_deployments_by_raw_selector_code(
             _flow_workspace(),
             model="H617E",
             selector_label=item.name,
-            content=item.content,
+            content=BuiltinScene(CatalogueRef("H617A", legacy.scene_id, legacy.effect_id)),
             origin=item.origin,
             observable_signature=f"scene:{legacy.name.casefold()}",
         )
@@ -1077,7 +1178,7 @@ async def test_matching_flow_workspace_suppresses_saved_sena_selector_history(
     workspace = _flow_workspace(confidence=ObservationConfidence.ACTIVATION_MATCH)
     active_workspaces.set(workspace)
     coordinator = _coordinator()
-    coordinator.unknown_scene_code = 24
+    coordinator.diy_code = 24
     repository.latest_for_diy_code = MagicMock(wraps=repository.latest_for_diy_code)
     repository.latest_for_effect = MagicMock(wraps=repository.latest_for_effect)
     repository.latest_for_profile = MagicMock(wraps=repository.latest_for_profile)
@@ -1114,7 +1215,7 @@ async def test_matching_flow_workspace_replaces_persisted_sena_hint_after_restar
     sena = _sena_item()
     await repository.async_put(_confirmed_saved_record(sena), expected_version=None)
     coordinator = _coordinator()
-    coordinator.unknown_scene_code = 24
+    coordinator.diy_code = 24
     stale = EffectDeploymentEngine(repository, cache).reconcile_current(
         coordinator,
         config_entry_id="entry-a",
@@ -1390,18 +1491,41 @@ async def test_h6199_uncertain_result_emits_structured_evidence_gap(
     }
 
 
-@pytest.mark.parametrize("model", ["H617A", "H617E", "H6199"])
+@pytest.mark.parametrize(
+    "model,kind",
+    [
+        ("H617A", "basic"),
+        ("H617E", "basic"),
+        ("H6199", "palette"),
+        ("H617A", "workshop"),
+        ("H617E", "workshop"),
+        ("H6199", "workshop"),
+    ],
+)
 async def test_workshop_uses_evidenced_model_application(
     hass: HomeAssistant,
     model: str,
+    kind: str,
 ) -> None:
     repository, cache = await _repositories(hass)
     coordinator = _coordinator()
     coordinator.model = model
-    item = LibraryItem.new("Workshop", WORKSHOP_PROTOCOL_FIXTURES[0].content(model))
-    compiled = compile_effect(item, model)
-    workshop_code = H6199_WORKSHOP_APPLY_CODE if model == "H6199" else H617A_WORKSHOP_APPLY_CODE
-    _confirm_scene_code_on_call(coordinator, 2, workshop_code)
+    coordinator.profile = get_profile(model)
+    item = (
+        _type04_item()
+        if kind == "basic"
+        else _h6199_item()
+        if kind == "palette"
+        else LibraryItem.new("Workshop", WORKSHOP_PROTOCOL_FIXTURES[0].content(model))
+    )
+    compiled = compile_effect(item, model, diy_code=resolve_diy_code(item, model=model))
+    workshop_code = compiled.diy_code
+    if kind == "basic":
+        _confirm_on_call(coordinator, 2, workshop_code)
+    else:
+        _confirm_scene_code_on_call(coordinator, 2, workshop_code)
+        coordinator.effect = "named catalogue collision"
+        coordinator.unknown_scene_code = None
 
     result = await EffectDeploymentEngine(repository, cache).async_apply_saved(
         coordinator,
@@ -1416,6 +1540,24 @@ async def test_workshop_uses_evidenced_model_application(
     assert coordinator.send_command.await_args_list == [call(packet) for packet in compiled.packets]
     assert cache.get("entry-a").mode == "custom"
     assert cache.get("entry-a").diy_code == workshop_code
+    assert cache.get("entry-a").effect is None
+    assert result.target_model == model
+    assert result.observable_signature == observable_signature_for_compiled(compiled)
+    coordinator.async_observe_effect.assert_awaited_once_with(
+        {"is_on": True, "diy_code" if kind == "basic" else "scene_code": workshop_code},
+        timeout=4.0,
+    )
+    await repository.async_load()
+    observed = EffectDeploymentEngine(repository, cache).reconcile_current(
+        coordinator,
+        config_entry_id="entry-a",
+        observed_at="2026-08-11T00:01:00Z",
+        refreshed=True,
+    )
+    assert observed.matched_operation_id == result.operation_id
+    coordinator.scene_code = workshop_code if kind == "basic" else None
+    coordinator.diy_code = None if kind == "basic" else workshop_code
+    assert not _activation_matches(coordinator, result)
 
 
 @pytest.mark.parametrize(
@@ -1499,9 +1641,9 @@ async def test_h617a_music_profile_applies_base_then_parameters_with_mode_confid
     assert result.content_kind == "music_profile"
     assert result.progress_current == result.progress_total == 2
     assert result.verification_confidence is ObservationConfidence.MODE_MATCH
-    assert coordinator.refresh_state.await_args_list[-1] == call(
-        expected_on=True,
-        expected_music_mode="separation",
+    coordinator.async_observe_effect.assert_awaited_once_with(
+        {"is_on": True, "music_mode": "separation"},
+        timeout=4.0,
     )
 
 
@@ -1583,7 +1725,12 @@ async def test_h6199_music_profile_confirms_all_written_settings(
 ) -> None:
     repository, cache = await _repositories(hass)
     coordinator = _profile_coordinator("H6199")
-    coordinator.install_music_profile_state = lambda **values: None
+
+    def install_music(**values):
+        coordinator.music_sensitivity = values["sensitivity"]
+        coordinator.music_color = values["colour"]
+
+    coordinator.install_music_profile_state = install_music
 
     async def select_music(mode: str, *, include_parameters: bool) -> None:
         coordinator.music_mode = mode
@@ -1608,7 +1755,12 @@ async def test_unsaved_music_profile_persists_the_applied_snapshot(
 ) -> None:
     repository, cache = await _repositories(hass)
     coordinator = _profile_coordinator("H6199")
-    coordinator.install_music_profile_state = lambda **values: None
+
+    def install_music(**values):
+        coordinator.music_sensitivity = values["sensitivity"]
+        coordinator.music_color = values["colour"]
+
+    coordinator.install_music_profile_state = install_music
 
     async def select_music(mode: str, *, include_parameters: bool) -> None:
         coordinator.music_mode = mode

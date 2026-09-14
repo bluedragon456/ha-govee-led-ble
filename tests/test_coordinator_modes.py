@@ -1,10 +1,14 @@
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from custom_components.ha_govee_led_ble.const import MUSIC_MODE_SLUGS
+from custom_components.ha_govee_led_ble import effect_contracts
+from custom_components.ha_govee_led_ble.const import MODEL_PROFILES, MUSIC_MODE_SLUGS, ModelProfile
+from custom_components.ha_govee_led_ble.control_arbiter import ControlIntent
 from custom_components.ha_govee_led_ble.coordinator import GoveeBLECoordinator
 from custom_components.ha_govee_led_ble.coordinator_modes import PreModeSnapshot
+from custom_components.ha_govee_led_ble.effect_contracts import CapabilityWorkflow, release_capability
 from custom_components.ha_govee_led_ble.generated_protocol_adapter import (
     build_h6199_video,
     build_music_mode,
@@ -17,6 +21,8 @@ from custom_components.ha_govee_led_ble.light_commands import (
 )
 from custom_components.ha_govee_led_ble.light_services import apply_active_video_mode
 from custom_components.ha_govee_led_ble.music_commands import build_music_params
+from custom_components.ha_govee_led_ble.native_scenes import build_native_scene_packets
+from custom_components.ha_govee_led_ble.scenes import MODEL_SCENES, SCENE_ENTRIES
 
 _CONFIGURATION_URL = "homeassistant://ha-govee-led-ble/editor/test-entry"
 
@@ -43,6 +49,50 @@ def h6199(hass):
 
 def _sent(sc):
     return [call.args[0] for call in sc.await_args_list]
+
+
+@pytest.mark.parametrize("grammar", ["H617A", "H6199"])
+@pytest.mark.parametrize("scene_type", [0, 1, 2])
+@pytest.mark.parametrize("intent", [ControlIntent.USER, ControlIntent.PREVIEW])
+async def test_native_scene_application_requires_exact_capability_and_grammar(
+    coord, monkeypatch, grammar, scene_type, intent
+):
+    model = "H9999"
+    scene = next(entry for entry in SCENE_ENTRIES[grammar] if entry.scene_type == scene_type)
+    profile = ModelProfile("Synthetic", command_grammar=grammar, supports_scenes=True)
+    monkeypatch.setitem(MODEL_PROFILES, model, profile)
+    monkeypatch.setitem(MODEL_SCENES, model, {"synthetic": scene})
+    coord.model, coord.profile = model, profile
+    coord.is_on = False
+    writer = AsyncMock()
+    # Packet encoding needs grammar, not application permission, even for uploaded scenes.
+    packets = build_native_scene_packets(model, scene)
+    with pytest.raises(ValueError, match="native_scenes application is not supported"):
+        await coord.async_apply_native_scene("synthetic", writer=writer, verify=False, intent=intent)
+
+    capability = release_capability(grammar, CapabilityWorkflow.NATIVE_SCENES)
+    assert capability is not None
+    monkeypatch.setattr(
+        effect_contracts,
+        "RELEASE_CAPABILITY_CONTRACT",
+        (*effect_contracts.RELEASE_CAPABILITY_CONTRACT, replace(capability, model=model)),
+    )
+    for effect_grammar in (None, "unknown", "H6199" if grammar == "H617A" else "H617A"):
+        coord.profile = replace(profile, effect_grammar=effect_grammar)
+        monkeypatch.setitem(MODEL_PROFILES, model, coord.profile)
+        with pytest.raises(ValueError, match="grammar and activation route"):
+            await coord.async_apply_native_scene(
+                "synthetic", scene_entry=scene, writer=writer, verify=False, intent=intent
+            )
+    writer.assert_not_awaited()
+    assert coord.is_on is False
+    assert coord.effect is None
+
+    coord.profile = replace(profile, effect_grammar=grammar)
+    monkeypatch.setitem(MODEL_PROFILES, model, coord.profile)
+    await coord.async_apply_native_scene("synthetic", writer=writer, verify=False, intent=intent)
+    assert _sent(writer) == [build_power(True, model), *packets]
+    assert coord.effect == "synthetic"
 
 
 async def test_select_music_slug_sends_power_then_music_and_sets_state(coord):

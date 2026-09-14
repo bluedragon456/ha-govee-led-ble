@@ -14,7 +14,9 @@ from .effect_deployments import ObservationConfidence
 from .effect_domain import (
     EffectContent,
     Origin,
+    PaletteDiyEffect,
     SourceKind,
+    WorkshopEffect,
     effect_content_from_dict,
     effect_content_hash,
     effect_content_to_dict,
@@ -117,13 +119,23 @@ class ActiveEffectWorkspace:
             content = effect_content_from_dict(required_persisted_mapping(raw, "content"))
         except ValueError as exc:
             raise EffectStorageError("active workspace is invalid") from exc
+        signature = required_persisted_string(raw, "observable_signature")
+        model = required_persisted_string(raw, "model")
+        if signature.startswith("custom:") and (
+            isinstance(content, WorkshopEffect)
+            and content.model == model
+            and model in {"H617A", "H617E", "H6199"}
+            or isinstance(content, PaletteDiyEffect)
+            and content.model == model == "H6199"
+        ):
+            signature = signature.replace("custom:", "scene-code:", 1)
         value = cls(
             config_entry_id=required_persisted_string(raw, "config_entry_id"),
-            model=required_persisted_string(raw, "model"),
+            model=model,
             selector_label=required_persisted_string(raw, "selector_label"),
             content=content,
             origin=origin,
-            observable_signature=required_persisted_string(raw, "observable_signature"),
+            observable_signature=signature,
             updated_at=required_persisted_string(raw, "updated_at"),
             generation=required_persisted_integer(raw, "generation"),
             confidence=confidence,

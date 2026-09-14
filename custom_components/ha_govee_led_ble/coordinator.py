@@ -25,7 +25,6 @@ from .const import (
     default_effect_categories,
     default_effect_families,
     get_profile,
-    protocol_model,
 )
 from .control_arbiter import BLEControlArbiter, ControlIntent, PreviewAdmission, async_control_intent
 from .coordinator_expectations import expectations_from_packet
@@ -65,7 +64,7 @@ from .native_profile_controls import (
     apply_white_balance,
 )
 from .native_scenes import build_native_scene_packets
-from .scenes import MODEL_SCENES, canonical_scene_key, resolve_scene_code
+from .scenes import MODEL_SCENES, canonical_scene_key, resolve_scene_code, scene_code_is_ambiguous
 from .transport import READ_UUID, WRITE_UUID
 
 EFFECT_SEQUENCE_ATTEMPTS = 3
@@ -315,12 +314,14 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             if (
                 state.diy_code is None
                 or (overwritten_diy_code is not None and state.diy_code == overwritten_diy_code)
-                or protocol_model(self.model) != "H617A"
+                or not self.profile.supports_custom_effects
+                or self.profile.effect_grammar != "H617A"
+                or self.profile.command_grammar != "H617A"
             ):
                 return False
             await self.send_command(build_h617a_diy_activation(state.diy_code))
             self.diy_code = state.diy_code
-            return self.profile.state_readable and await self.refresh_state() and self.diy_code == state.diy_code
+            return await self.async_observe_effect({"is_on": True, "diy_code": state.diy_code}) is True
         if state.mode == "scene" and (state.effect is not None or state.scene_code is not None):
             resolved = (
                 resolve_scene_code(
@@ -1125,8 +1126,17 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         field_baselines: Mapping[str, int],
         domain_baselines: Mapping[StatusDomain, int],
         deadline: float,
+        *,
+        expectations: Mapping[str, Any] | None = None,
     ) -> bool:
         def received() -> bool:
+            if expectations is not None and any(
+                field != "effect"
+                and self._field_revisions.get(field, 0) > field_baselines[field]
+                and getattr(self, field) != expected
+                for field, expected in expectations.items()
+            ):
+                return True
             if field_baselines:
                 return all(
                     self._field_revisions.get(field, 0) > baseline for field, baseline in field_baselines.items()
@@ -1439,7 +1449,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                         if isinstance(err, TimeoutError) or "already shutdown" in error or "not found" in error:
                             await asyncio.sleep(RETRY_BACKOFF_SECONDS * attempt)
 
-    async def async_preview_observe(
+    async def async_observe_effect(
         self,
         expectations: Mapping[str, Any],
         *,
@@ -1447,6 +1457,17 @@ class GoveeBLECoordinator(_ActiveModeMixin):
     ) -> bool | None:
         if not self.profile.state_readable or not expectations:
             return None
+        expectations = dict(expectations)
+        for field, mode in (
+            ("diy_code", ParsedMode.DIY),
+            ("scene_code", ParsedMode.SCENE),
+            ("unknown_scene_code", ParsedMode.SCENE),
+            ("music_mode", ParsedMode.MUSIC),
+            ("video_mode", ParsedMode.VIDEO),
+        ):
+            if expectations.get(field) is not None:
+                expectations["color_mode"] = mode
+                break
         query_power = "is_on" in expectations
         query_brightness = "brightness_pct" in expectations
         query_color = bool(
@@ -1483,12 +1504,14 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 }
             )
         )
-        field_baselines = {field: self._field_revisions.get(field, 0) for field in expectations}
-        async with async_control_intent(self, ControlIntent.PREVIEW):
+        current_intent = self._control_arbiter.current_task_intent
+        intent = ControlIntent.PREVIEW if current_intent is None else current_intent
+        async with async_control_intent(self, intent):
             async with self._lock:
                 client = self._client
                 if client is None or not client.is_connected:
                     return None
+                field_baselines = {field: self._field_revisions.get(field, 0) for field in expectations}
                 ok = await self._send_state_queries(
                     query_power=query_power,
                     query_brightness=query_brightness,
@@ -1503,7 +1526,20 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             field_baselines,
             {},
             time.monotonic() + timeout,
+            expectations=expectations,
         ):
+            return None
+        # A fresh contradiction is a mismatch even if sibling fields never arrived.
+        if any(
+            field != "effect"
+            and self._field_revisions.get(field, 0) > field_baselines[field]
+            and getattr(self, field) != expected
+            for field, expected in expectations.items()
+        ):
+            return False
+        scene_code = expectations.get("scene_code")
+        if scene_code is not None and scene_code_is_ambiguous(self.model, scene_code):
+            # Catalogue names are derived from this same selector, not independent readback.
             return None
         return all(getattr(self, field) == expected for field, expected in expectations.items())
 

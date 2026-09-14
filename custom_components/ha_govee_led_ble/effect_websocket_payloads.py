@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from .const import protocol_model, resolve_model
+from .const import resolve_model
 from .effect_deployments import DeploymentSnapshot
 from .effect_domain import (
     BuiltinScene,
@@ -42,9 +42,6 @@ def item_summary(item: LibraryItem) -> dict[str, Any]:
     )
     if isinstance(model, str) and resolve_model(model) is not None:
         summary["model"] = model
-    elif kind in {"h617a_painted", "h617a_single", "h617a_multi"}:
-        hinted_model = item.target_hint.model if item.target_hint is not None else None
-        summary["model"] = hinted_model if protocol_model(hinted_model or "") == "H617A" else "H617A"
     elif kind in {"scene_builtin", "scene_palette", "scene_layered"}:
         template = content.get("template")
         sku = template.get("sku") if isinstance(template, dict) else None
@@ -52,6 +49,8 @@ def item_summary(item: LibraryItem) -> dict[str, Any]:
             summary["model"] = sku
     elif item.target_hint is not None and resolve_model(item.target_hint.model) is not None:
         summary["model"] = item.target_hint.model
+    elif item.target_hint is None and kind in {"h617a_painted", "h617a_single", "h617a_multi"}:
+        summary["model"] = "H617A"
     if isinstance(item.content, BuiltinScene | PaletteScene | LayeredScene):
         summary["template"] = content["template"]
     return summary

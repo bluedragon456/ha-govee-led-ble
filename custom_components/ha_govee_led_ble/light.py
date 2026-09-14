@@ -48,6 +48,7 @@ from .effect_deployments import DeploymentRecord
 from .effect_diagnostics import DiagnosticOutcome, DiagnosticStage
 from .effect_domain import EffectValidationError, LibraryItem, effect_content_to_dict
 from .effect_runtime import (
+    active_workspace_matches,
     async_apply_compiled_profile,
     observable_signatures_for_coordinator,
 )
@@ -385,14 +386,7 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
             return None
         active_workspaces = getattr(self._effect_backend, "active_workspaces", None)
         workspace = active_workspaces.get(self._config_entry_id) if active_workspaces is not None else None
-        observable_signatures = observable_signatures_for_coordinator(self.coordinator)
-        if (
-            workspace is None
-            or workspace.model != self.coordinator.model
-            or workspace.observable_signature not in observable_signatures
-        ):
-            return None
-        return workspace
+        return workspace if active_workspace_matches(self.coordinator, workspace) else None
 
     def _saved_effect_visible(self, item: LibraryItem) -> bool:
         content_kind = effect_content_to_dict(item.content).get("kind")

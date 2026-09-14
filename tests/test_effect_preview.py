@@ -13,14 +13,13 @@ import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from custom_components.ha_govee_led_ble.const import DOMAIN, EFFECT_FAMILY_SCENES
+from custom_components.ha_govee_led_ble.const import DOMAIN, EFFECT_FAMILY_SCENES, get_profile
 from custom_components.ha_govee_led_ble.control_arbiter import BLEControlArbiter, ControlIntent
 from custom_components.ha_govee_led_ble.coordinator import GoveeBLECoordinator
 from custom_components.ha_govee_led_ble.effect_active_workspace import (
     ActiveEffectWorkspaceRepository,
 )
 from custom_components.ha_govee_led_ble.effect_catalogue import (
-    H617A_WORKSHOP_APPLY_CODE,
     WORKSHOP_PROTOCOL_FIXTURES,
     resolve_catalogue_template,
 )
@@ -33,6 +32,7 @@ from custom_components.ha_govee_led_ble.effect_domain import (
     LibraryItem,
     MusicProfile,
     Origin,
+    PaletteDiyEffect,
     RelativeBrightness,
     SingleEffect,
     SourceKind,
@@ -69,7 +69,9 @@ def _item(name: str, speed: int = 50) -> LibraryItem:
 def _coordinator(*, model: str = "H617A", readable: bool = False) -> SimpleNamespace:
     coordinator = SimpleNamespace(
         model=model,
-        profile=SimpleNamespace(state_readable=readable),
+        profile=get_profile(model)
+        if readable
+        else replace(get_profile(model), read_domains=frozenset(), setup_required_read_domains=frozenset()),
         effect_families={EFFECT_FAMILY_SCENES},
         _control_lock=asyncio.Lock(),
         is_on=False,
@@ -106,7 +108,7 @@ def _coordinator(*, model: str = "H617A", readable: bool = False) -> SimpleNames
                 await progress(index)
 
     coordinator.async_write_effect_sequence = AsyncMock(side_effect=write_effect_sequence)
-    coordinator.async_preview_observe = AsyncMock(return_value=True)
+    coordinator.async_observe_effect = AsyncMock(return_value=True)
     coordinator.send_command = AsyncMock(side_effect=AssertionError("preview verification must not call send_command"))
     return coordinator
 
@@ -487,7 +489,7 @@ async def test_native_scene_preview_uses_scene_speed_primitive_for_repeated_sele
 
     assert len(applied) == 2
     assert all(item[1:] == (scene.speed.default_index, False) for item in applied)
-    assert coordinator.async_preview_observe.await_args_list[-1].args[0] == {
+    assert coordinator.async_observe_effect.await_args_list[-1].args[0] == {
         "is_on": True,
         "scene_code": scene.code,
     }
@@ -532,7 +534,7 @@ async def test_ambiguous_h617e_legacy_scene_preview_requires_code_and_canonical_
     )
     await manager.async_wait_idle("entry-a")
 
-    assert coordinator.async_preview_observe.await_args.args[0] == {
+    assert coordinator.async_observe_effect.await_args.args[0] == {
         "is_on": True,
         "scene_code": legacy.code,
         "effect": "aurora-a",
@@ -874,7 +876,7 @@ async def test_latest_verification_is_read_only_without_holding_control_lock(
         coordinator.send_command.assert_not_awaited()
         return True
 
-    coordinator.async_preview_observe.side_effect = observe
+    coordinator.async_observe_effect.side_effect = observe
     manager, _cache = await _manager(hass, monkeypatch, coordinator)
     owner = object()
     events: list[PreviewStatus] = []
@@ -889,7 +891,7 @@ async def test_latest_verification_is_read_only_without_holding_control_lock(
     )
     await manager.async_wait_idle("entry-a")
 
-    coordinator.async_preview_observe.assert_awaited_once()
+    coordinator.async_observe_effect.assert_awaited_once()
     coordinator.send_command.assert_not_awaited()
     assert any(
         event.phase is PreviewPhase.CONFIRMED and event.confidence is ObservationConfidence.ACTIVATION_MATCH
@@ -902,7 +904,7 @@ async def test_silent_preview_remains_written_until_read_only_check_confirms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     coordinator = _coordinator(readable=True)
-    coordinator.async_preview_observe.side_effect = [None, True]
+    coordinator.async_observe_effect.side_effect = [None, True]
     manager, _cache = await _manager(hass, monkeypatch, coordinator)
     owner = object()
     events: list[PreviewStatus] = []
@@ -929,7 +931,7 @@ async def test_silent_preview_remains_written_until_read_only_check_confirms(
     assert confirmed.phase is PreviewHealthPhase.HEALTHY
     assert confirmed.error_code is None
     assert coordinator.async_preview_write.await_count > 0
-    assert coordinator.async_preview_observe.await_count == 2
+    assert coordinator.async_observe_effect.await_count == 2
 
 
 async def test_health_mints_a_new_incident_after_recovery(
@@ -1013,7 +1015,7 @@ async def test_stale_in_progress_verification_finishes_but_cannot_publish(
             await release_first_observation.wait()
         return True
 
-    coordinator.async_preview_observe.side_effect = observe
+    coordinator.async_observe_effect.side_effect = observe
     manager, _cache = await _manager(hass, monkeypatch, coordinator)
     owner = object()
     events: list[PreviewStatus] = []
@@ -1048,16 +1050,40 @@ async def test_stale_in_progress_verification_finishes_but_cannot_publish(
     await manager.async_shutdown()
 
 
+@pytest.mark.parametrize(
+    "model,kind",
+    [
+        ("H617A", "basic"),
+        ("H617E", "basic"),
+        ("H6199", "palette"),
+        ("H617A", "workshop"),
+        ("H617E", "workshop"),
+        ("H6199", "workshop"),
+    ],
+)
 async def test_workshop_preview_verifies_evidenced_selector(
     hass: HomeAssistant,
     monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    kind: str,
 ) -> None:
-    coordinator = _coordinator(readable=True)
+    coordinator = _coordinator(model=model, readable=True)
     manager, _cache = await _manager(hass, monkeypatch, coordinator)
     owner = object()
     events: list[PreviewStatus] = []
     session_id = _open(manager, owner, events)
-    item = LibraryItem.new("Workshop", WORKSHOP_PROTOCOL_FIXTURES[0].content("H617A"))
+    item = (
+        _item("Basic")
+        if kind == "basic"
+        else LibraryItem.new(
+            "Custom",
+            PaletteDiyEffect(model, 8, 9, 60, ((255, 0, 0),))
+            if kind == "palette"
+            else WORKSHOP_PROTOCOL_FIXTURES[0].content(model),
+        )
+    )
+    compiled = compile_application(item, model, diy_code=resolve_diy_code(item, model=model))
+    assert isinstance(compiled, CompiledEffect)
 
     await manager.async_queue_snapshot(
         session_id=session_id,
@@ -1069,14 +1095,20 @@ async def test_workshop_preview_verifies_evidenced_selector(
     )
     await manager.async_wait_idle("entry-a")
 
-    coordinator.async_preview_observe.assert_awaited_once_with(
+    coordinator.async_observe_effect.assert_awaited_once_with(
         {
             "is_on": True,
-            "unknown_scene_code": H617A_WORKSHOP_APPLY_CODE,
+            "diy_code" if kind == "basic" else "scene_code": compiled.diy_code,
         },
         timeout=0.1,
     )
     assert any(event.phase is PreviewPhase.CONFIRMED for event in events)
+    assert coordinator.diy_code == (compiled.diy_code if kind == "basic" else None)
+    assert coordinator._scene_code == (None if kind == "basic" else compiled.diy_code)
+    assert manager._active_workspaces is not None
+    workspace = manager._active_workspaces.get("entry-a")
+    assert workspace is not None
+    assert workspace.observable_signature == f"{'custom' if kind == 'basic' else 'scene-code'}:{compiled.diy_code}"
     await manager.async_shutdown()
 
 
@@ -1123,7 +1155,7 @@ async def test_snapshot_profile_previews_use_preview_transport(
     )
     coordinator.async_preview_preflight = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_preview_write = AsyncMock()  # type: ignore[method-assign]
-    coordinator.async_preview_observe = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    coordinator.async_observe_effect = AsyncMock(return_value=True)  # type: ignore[method-assign]
     coordinator.send_command = AsyncMock(side_effect=AssertionError("preview must use preview transport"))  # type: ignore[method-assign]
     manager, _cache = await _manager(hass, monkeypatch, coordinator)
     owner = object()
@@ -1736,11 +1768,11 @@ async def test_preview_verification_reports_non_successful_readback(
 ) -> None:
     coordinator = _coordinator(readable=True)
     if observation == "timeout":
-        coordinator.async_preview_observe.side_effect = TimeoutError
+        coordinator.async_observe_effect.side_effect = TimeoutError
     elif isinstance(observation, Exception):
-        coordinator.async_preview_observe.side_effect = observation
+        coordinator.async_observe_effect.side_effect = observation
     else:
-        coordinator.async_preview_observe.return_value = observation
+        coordinator.async_observe_effect.return_value = observation
     manager, _cache = await _manager(
         hass,
         monkeypatch,

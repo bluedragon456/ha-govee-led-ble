@@ -119,6 +119,7 @@ def test_committed_palette_scenes_compile_to_byte_exact_model_frames() -> None:
         expected = build_native_scene_packets(model, entry)
 
         assert compiled.activation_mode is ActivationMode.SCENE
+        assert compiled.selector_kind == "scene"
         assert compiled.packets == tuple(expected)
         assert compiled.evidence_codes == ("scene_payload_readback_unavailable",)
 

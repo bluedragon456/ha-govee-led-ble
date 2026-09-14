@@ -9,12 +9,15 @@ from typing import Any, cast
 
 import pytest
 
+from custom_components.ha_govee_led_ble import effect_contracts
+from custom_components.ha_govee_led_ble.const import MODEL_PROFILES, ModelProfile
 from custom_components.ha_govee_led_ble.effect_compiler import (
     ActivationMode,
     CompatibilityState,
     compatibility,
     compile_effect,
 )
+from custom_components.ha_govee_led_ble.effect_contracts import ApplicationRoute, CapabilityWorkflow, release_capability
 from custom_components.ha_govee_led_ble.effect_domain import (
     BuiltinScene,
     CatalogueRef,
@@ -27,12 +30,14 @@ from custom_components.ha_govee_led_ble.generated_protocol.scene_body import Sce
 from custom_components.ha_govee_led_ble.generated_protocol_adapter import (
     _check_tree,
     _write,
+    build_scene_activation,
     parse_scene_body_param,
 )
 from custom_components.ha_govee_led_ble.layered_scene_decoder import decode_layered_scene, encode_layered_scene
 from custom_components.ha_govee_led_ble.native_scenes import apply_scene_speed, build_native_scene_packets
-from custom_components.ha_govee_led_ble.scenes import SCENE_ENTRIES, SceneEntry
-from custom_components.ha_govee_led_ble.transport import fragment_a3
+from custom_components.ha_govee_led_ble.palette_scene_decoder import decode_catalogue_palette_scene
+from custom_components.ha_govee_led_ble.scenes import MODEL_SCENES, SCENE_ENTRIES, SceneEntry
+from custom_components.ha_govee_led_ble.transport import fragment_a3, xor_checksum
 
 _LAYERED_SCENE_TYPE = int(SceneBody.SceneType.scene_v2)
 
@@ -234,11 +239,111 @@ def test_decoded_layered_scenes_compile_to_byte_exact_model_frames() -> None:
         expected = build_native_scene_packets(model, entry, speed_index=content.speed_index)
 
         assert compiled.activation_mode is ActivationMode.SCENE
+        assert compiled.selector_kind == "scene"
         assert compiled.packets == tuple(expected)
         assert compiled.evidence_codes == (
             "scene_payload_readback_unavailable",
             "layered_field_semantics_uncalibrated",
         )
+
+
+@pytest.mark.parametrize("grammar", ["H617A", "H6199"])
+@pytest.mark.parametrize("scene_type", [0, 1, 2])
+@pytest.mark.parametrize("disabled_route", [ApplicationRoute.NONE, ApplicationRoute.STUDIO_SCENE_APPLY])
+def test_exact_qualified_scene_routes_share_native_and_authored_activation(
+    monkeypatch, grammar, scene_type, disabled_route
+):
+    model = "H9999"
+    entry = next(scene for scene in SCENE_ENTRIES[grammar] if scene.scene_type == scene_type)
+    # Independent nonzero selectors distinguish music bytes from H617A's scene type.
+    entry = replace(entry, code=0x1234, music_code=0x5678)
+    monkeypatch.setitem(
+        MODEL_PROFILES,
+        model,
+        ModelProfile(
+            "Synthetic",
+            command_grammar=grammar,
+            effect_grammar=grammar,
+            supports_scenes=True,
+            advanced_scene_carrier=(entry.scene_id, entry.effect_id),
+        ),
+    )
+    monkeypatch.setitem(MODEL_SCENES, model, {"synthetic": entry})
+    content = BuiltinScene(_reference(model, entry))
+    items = [(LibraryItem.new("Native", content), CapabilityWorkflow.NATIVE_SCENES)]
+    if scene_type == 1:
+        authored = decode_catalogue_palette_scene(model, entry)
+        assert authored is not None
+        items.append((LibraryItem.new("Palette", authored), CapabilityWorkflow.EDITED_PALETTE_SCENES))
+    elif scene_type == 2:
+        authored = decode_layered_scene(_reference(model, entry), _raw_param(entry))
+        items.extend(
+            [
+                (LibraryItem.new("Layered", authored), CapabilityWorkflow.LAYERED_SCENES),
+                (LibraryItem.new("Advanced", authored.effect), CapabilityWorkflow.ADVANCED),
+            ]
+        )
+    prefix = bytes.fromhex("3305043412") + (bytes.fromhex("7856") if grammar == "H6199" else b"\x00\x00")
+    frame = prefix.ljust(19, b"\x00")
+    expected_activation = frame + bytes([xor_checksum(frame)])
+    native_packets = tuple(build_native_scene_packets(model, entry))
+    assert native_packets[-1] == expected_activation
+
+    for item, workflow in items:
+        assert compatibility(item, model).state is CompatibilityState.INCOMPATIBLE
+        with pytest.raises(ValueError, match="application is not supported"):
+            compile_effect(item, model)
+        capability = release_capability(grammar, workflow)
+        assert capability is not None
+        monkeypatch.setattr(
+            effect_contracts,
+            "RELEASE_CAPABILITY_CONTRACT",
+            (*effect_contracts.RELEASE_CAPABILITY_CONTRACT, replace(capability, model=model)),
+        )
+        compiled = compile_effect(item, model)
+        assert compiled.model == model
+        assert compiled.selector_kind == "scene"
+        assert compiled.activation_mode is ActivationMode.SCENE
+        assert compiled.diy_code == entry.code
+        assert compiled.activation_packet == expected_activation
+        if workflow is not CapabilityWorkflow.ADVANCED:
+            assert compiled.packets == native_packets
+            with pytest.raises(ValueError, match=f"targets {model}"):
+                compile_effect(item, grammar)
+        profile = MODEL_PROFILES[model]
+        for field in ("effect_grammar", "command_grammar"):
+            for missing in (None, "unknown", "H6199" if grammar == "H617A" else "H617A"):
+                monkeypatch.setitem(MODEL_PROFILES, model, replace(profile, **{field: missing}))
+                assert compatibility(item, model).state is CompatibilityState.INCOMPATIBLE
+                with pytest.raises(ValueError, match="activation route"):
+                    compile_effect(item, model)
+        monkeypatch.setitem(MODEL_PROFILES, model, profile)
+        monkeypatch.setattr(
+            effect_contracts,
+            "RELEASE_CAPABILITY_CONTRACT",
+            tuple(
+                replace(
+                    capability,
+                    application_route=ApplicationRoute.NONE
+                    if workflow is CapabilityWorkflow.NATIVE_SCENES
+                    else disabled_route,
+                )
+                if capability.model == model and capability.workflow is workflow
+                else capability
+                for capability in effect_contracts.RELEASE_CAPABILITY_CONTRACT
+            ),
+        )
+        with pytest.raises(ValueError, match="application is not supported"):
+            compile_effect(item, model)
+
+
+@pytest.mark.parametrize("grammar", [None, "unknown"])
+def test_scene_activation_builder_has_no_fallback_grammar(monkeypatch, grammar):
+    monkeypatch.setitem(MODEL_PROFILES, "H9999", ModelProfile("Synthetic", command_grammar=grammar))
+    with pytest.raises(ValueError, match="scene activation grammar"):
+        build_scene_activation("H9999", 401)
+    with pytest.raises(ValueError, match="scene activation grammar"):
+        build_native_scene_packets("H9999", SceneEntry(code=401, scene_type=0))
 
 
 def test_saved_builtin_scenes_compile_to_native_scene_packets() -> None:

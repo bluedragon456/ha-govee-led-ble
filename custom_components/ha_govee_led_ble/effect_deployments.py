@@ -337,8 +337,16 @@ class DeploymentRecord:
     progress_total: int = 0
     verification_confidence: ObservationConfidence = ObservationConfidence.UNKNOWN
     prior_state: PriorControlState | None = None
+    target_model: str | None = None
+    observable_signature: str | None = None
 
     def __post_init__(self) -> None:
+        for value, name in (
+            (self.target_model, "deployment target model"),
+            (self.observable_signature, "deployment observable signature"),
+        ):
+            if value is not None:
+                validate_bounded_string(value, name, maximum=MAX_IDENTIFIER_LENGTH, error_type=EffectStorageError)
         validate_bounded_string(
             self.config_entry_id,
             "deployment config entry ID",
@@ -462,6 +470,8 @@ class DeploymentRecord:
             "progress_total": self.progress_total,
             "verification_confidence": self.verification_confidence.value,
             "prior_state": self.prior_state.to_dict() if self.prior_state is not None else None,
+            "target_model": self.target_model,
+            "observable_signature": self.observable_signature,
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -515,6 +525,8 @@ class DeploymentRecord:
             updated_at=_required_str(raw, "updated_at"),
             target_mode=_optional_str(raw, "target_mode") or "custom",
             target_effect=_optional_str(raw, "target_effect"),
+            target_model=_optional_str(raw, "target_model"),
+            observable_signature=_optional_str(raw, "observable_signature"),
             evidence_codes=_string_tuple(raw.get("evidence_codes", ()), "deployment evidence codes"),
             source_kind=_optional_str(raw, "source_kind") or "saved_effect",
             selector_label=_required_str(raw, "selector_label"),

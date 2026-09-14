@@ -53,7 +53,7 @@ from .effect_preview import (
     PreviewStatus,
     PreviewTargetUnavailableError,
 )
-from .effect_runtime import observable_signatures_for_coordinator
+from .effect_runtime import active_workspace_matches
 from .effect_scenes import (
     async_apply_scene,
     async_reset_scene_default,
@@ -214,11 +214,7 @@ def _device_payload(
     device["active_state"] = observed.to_public_dict()
     workspace = backend.active_workspaces.get(entry.entry_id)
     device["active_workspace"] = (
-        workspace.to_dict()
-        if workspace is not None
-        and workspace.model == coordinator.model
-        and workspace.observable_signature in observable_signatures_for_coordinator(coordinator)
-        else None
+        workspace.to_dict() if workspace is not None and active_workspace_matches(coordinator, workspace) else None
     )
     device["preview_health"] = backend.preview.health(entry.entry_id).to_dict()
     return device

@@ -802,6 +802,22 @@ def build_segment_brightness(
     return _serialize_xor(root)
 
 
+def build_scene_activation(
+    model: str,
+    scene_code: int,
+    music_code: int = 0,
+    *,
+    scene_type: int = 0,
+) -> bytes:
+    """Encode a scene selector using only the target's evidenced command grammar."""
+    grammar = get_profile(model).command_grammar
+    if grammar == "H617A":
+        return build_h617a_scene(scene_code, scene_type=scene_type)
+    if grammar == "H6199":
+        return build_h6199_scene(scene_code, music_code)
+    raise ValueError(f"{model} has no generated scene activation grammar")
+
+
 def build_h6199_scene(scene_code: int, music_code: int = 0) -> bytes:
     root = H6199CommandWrite()
     root.header = b"\x33"

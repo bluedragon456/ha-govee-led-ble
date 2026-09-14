@@ -550,7 +550,7 @@ def test_profile_compatibility_rejects_model_or_mode_mismatches(item, model, rea
 def test_compile_application_requires_the_matching_application_route() -> None:
     custom = LibraryItem.new("Custom", SingleEffect(0, 0, 50, ((255, 0, 0),)))
 
-    with pytest.raises(ValueError, match="H6199 custom-effect upload is not supported"):
+    with pytest.raises(ValueError, match="H6199 single application is not supported"):
         compile_application(custom, "H6199", diy_code=24)
     with pytest.raises(ValueError, match="requires a DIY code"):
         compile_application(custom, "H617A")
@@ -609,12 +609,15 @@ def test_workshop_compiler_reproduces_fixture_body_with_evidenced_model_activati
 
     compiled = compile_effect(item, model)
 
+    assert compiled.selector_kind == "scene"
+    assert compiled.activation_mode.value == "custom"
     if model == "H6199":
         assert compiled.activation_packet == effect_commands.build_h6199_palette_diy_activation(
             H6199_WORKSHOP_APPLY_CODE,
             0,
         )
         assert compiled.diy_code == H6199_WORKSHOP_APPLY_CODE
+        assert compiled.activation_packet == bytes.fromhex("33050492010000000000000000000000000000a1")
     else:
         assert compiled.activation_packet == build_h617a_scene(
             H617A_WORKSHOP_APPLY_CODE,

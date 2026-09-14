@@ -94,6 +94,22 @@ async def test_personal_repositories_use_injected_stores_without_home_assistant(
     assert reloaded_user_state.get("user-a") == state
 
 
+async def test_optional_observation_metadata_and_legacy_records_reload() -> None:
+    legacy = _deployment(DeploymentPhase.CONFIRMED).to_dict()
+    legacy.pop("target_model")
+    legacy.pop("observable_signature")
+    parsed = DeploymentRecord.from_dict(legacy)
+    assert parsed.target_model is parsed.observable_signature is None
+    record = replace(parsed, target_model="H6199", observable_signature="scene-code:401")
+    store = InMemoryVersionedDocumentStore()
+    repository = EffectDeploymentRepository(store)
+    await repository.async_load()
+    await repository.async_put(record, expected_version=None)
+    reloaded = EffectDeploymentRepository(store)
+    assert (await reloaded.async_load()).records == (record,)
+    assert "target_model" not in record.to_public_dict()
+
+
 async def test_library_hash_reconciliation_updates_deployments_and_active_hints() -> None:
     item = _item()
     stale_hash = "0" * 64

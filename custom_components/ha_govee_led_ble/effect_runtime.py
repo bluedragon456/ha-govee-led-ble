@@ -10,16 +10,12 @@ from dataclasses import replace
 from typing import Any
 from uuid import UUID, uuid4
 
-from .const import MUSIC_MODE_SLUGS, get_profile, protocol_model
+from .const import MUSIC_MODE_SLUGS, ModelProfile, ReadDomain, get_profile
 from .control_arbiter import ControlIntent, async_control_intent
 from .coordinator import GoveeBLECoordinator
 from .effect_active_workspace import (
     ActiveEffectWorkspace,
     ActiveEffectWorkspaceRepository,
-)
-from .effect_catalogue import (
-    H617A_TYPE04_APPLY_CODE,
-    H6199_PALETTE_DIY_APPLY_CODE,
 )
 from .effect_compiler import (
     ActivationMode,
@@ -28,8 +24,8 @@ from .effect_compiler import (
     CompiledMusicProfile,
     CompiledVideoProfile,
     compile_application,
-    workshop_apply_code,
 )
+from .effect_compiler import resolve_diy_code as resolve_diy_code
 from .effect_deployments import (
     DeploymentPhase,
     DeploymentRecord,
@@ -38,14 +34,13 @@ from .effect_deployments import (
     PriorControlState,
 )
 from .effect_domain import (
+    BuiltinScene,
     EffectContent,
+    LayeredEffect,
+    LayeredScene,
     LibraryItem,
-    MultiEffect,
-    MusicProfile,
-    PaintedEffect,
     PaletteDiyEffect,
-    SingleEffect,
-    VideoProfile,
+    PaletteScene,
     WorkshopEffect,
 )
 from .effect_identity import ActiveEffectHint, EffectDeviceCache, ObservedDeviceState
@@ -61,7 +56,7 @@ from .native_profile_controls import (
     apply_relative_brightness,
     apply_white_balance,
 )
-from .scenes import canonical_scene_key, scene_code_is_ambiguous
+from .scenes import canonical_scene_key, resolve_scene_identity, scene_code_is_ambiguous
 
 ACTIVATION_ATTEMPTS = 2
 VERIFICATION_ATTEMPTS = 2
@@ -202,7 +197,7 @@ class EffectDeploymentEngine:
         operation_id: UUID | None,
         source_kind: str,
     ) -> tuple[CompiledApplication, DeploymentRecord]:
-        resolved_diy_code = resolve_diy_code(item, diy_code)
+        resolved_diy_code = resolve_diy_code(item, diy_code, model=coordinator.model)
         compiled = compile_application(item, coordinator.model, diy_code=resolved_diy_code)
         record = self._new_record(
             compiled,
@@ -261,7 +256,7 @@ class EffectDeploymentEngine:
         )
         if result.phase is DeploymentPhase.CONFIRMED:
             if self._active_workspaces is not None:
-                signature = observable_signature_for_coordinator(coordinator)
+                signature = observable_signature_for_compiled(compiled)
                 if signature is not None:
                     self._active_workspaces.set(
                         ActiveEffectWorkspace(
@@ -347,6 +342,8 @@ class EffectDeploymentEngine:
             updated_at=updated_at,
             target_mode=target_mode,
             target_effect=target_effect,
+            target_model=compiled.model,
+            observable_signature=observable_signature_for_compiled(compiled),
             evidence_codes=evidence_codes,
             source_kind=source_kind,
             selector_label=source_item.name,
@@ -590,7 +587,8 @@ class EffectDeploymentEngine:
         compiled: CompiledApplication,
         record: DeploymentRecord,
     ) -> tuple[bool, ObservationConfidence, DeploymentRecord]:
-        if not coordinator.profile.state_readable:
+        expectations, confidence = compiled_observation(compiled, profile=coordinator.profile)
+        if expectations is None:
             return False, ObservationConfidence.UNKNOWN, record
         if not isinstance(compiled, CompiledEffect):
             return await self._async_verify_profile(coordinator, compiled, record)
@@ -598,20 +596,26 @@ class EffectDeploymentEngine:
             raise RuntimeError("compiled activation verification has no activation packet")
         current = record
         for attempt in range(VERIFICATION_ATTEMPTS):
-            try:
-                refreshed = await coordinator.refresh_state()
-            except Exception:
-                if attempt + 1 == VERIFICATION_ATTEMPTS:
-                    raise
-                continue
-            if refreshed and _activation_matches(coordinator, record):
-                return True, ObservationConfidence.ACTIVATION_MATCH, current
-            if refreshed and attempt + 1 < VERIFICATION_ATTEMPTS:
-                current = replace(current, phase=DeploymentPhase.ACTIVATING)
-                await self._deployments.async_put(current, expected_version=None)
-                await self._async_activate(coordinator, compiled.activation_packet)
-                current = replace(current, phase=DeploymentPhase.VERIFYING)
-                await self._deployments.async_put(current, expected_version=None)
+            # Suppressed or missing readback does not spend an activation retry.
+            refreshed = None
+            for observation in range(VERIFICATION_ATTEMPTS):
+                try:
+                    refreshed = await coordinator.async_observe_effect(expectations, timeout=4.0)
+                except Exception:
+                    if observation + 1 == VERIFICATION_ATTEMPTS:
+                        raise
+                    continue
+                if refreshed is not None:
+                    break
+            if refreshed is True:
+                return True, confidence, current
+            if refreshed is not False or attempt + 1 == VERIFICATION_ATTEMPTS:
+                break
+            current = replace(current, phase=DeploymentPhase.ACTIVATING)
+            await self._deployments.async_put(current, expected_version=None)
+            await self._async_activate(coordinator, compiled.activation_packet)
+            current = replace(current, phase=DeploymentPhase.VERIFYING)
+            await self._deployments.async_put(current, expected_version=None)
         return False, ObservationConfidence.UNKNOWN, current
 
     async def _async_verify_profile(
@@ -621,9 +625,11 @@ class EffectDeploymentEngine:
         record: DeploymentRecord,
     ) -> tuple[bool, ObservationConfidence, DeploymentRecord]:
         current = record
-        confidence = _profile_verification_confidence(compiled)
+        expectations, confidence = compiled_observation(compiled, profile=coordinator.profile)
+        if expectations is None:
+            return False, ObservationConfidence.UNKNOWN, current
         for attempt in range(VERIFICATION_ATTEMPTS):
-            if await _async_refresh_profile(coordinator, compiled):
+            if await coordinator.async_observe_effect(expectations, timeout=4.0) is True:
                 return True, confidence, current
             if attempt + 1 < VERIFICATION_ATTEMPTS:
                 current = replace(
@@ -677,9 +683,9 @@ class EffectDeploymentEngine:
                         recovering.prior_state,
                         overwritten_diy_code=(
                             recovering.diy_code
-                            if recovering.target_mode == ActivationMode.CUSTOM.value
+                            if _record_signature(recovering, coordinator.model) == f"custom:{recovering.diy_code}"
                             else -1
-                            if recovering.target_mode == ActivationMode.SCENE.value
+                            if recovering.target_mode in {ActivationMode.SCENE.value, ActivationMode.CUSTOM.value}
                             else None
                         ),
                     )
@@ -889,34 +895,41 @@ class EffectDeploymentEngine:
         mode = _coordinator_mode(coordinator)
         previous = self._device_cache.get(config_entry_id) if self._device_cache is not None else None
         scene_code = getattr(coordinator, "scene_code", None)
-        raw_scene_code = getattr(coordinator, "unknown_scene_code", None)
         diy_code = coordinator.diy_code if mode == "custom" else None
         effect = coordinator.effect if mode == "scene" else None
         observable_signature = observable_signature_for_coordinator(coordinator)
         observable_signatures = observable_signatures_for_coordinator(coordinator)
         workspace = self._active_workspaces.get(config_entry_id) if self._active_workspaces is not None else None
-        workspace_matches = (
-            workspace is not None
-            and workspace.model == coordinator.model
-            and workspace.observable_signature in observable_signatures
-        )
-        if workspace_matches and raw_scene_code is not None:
-            mode = "custom"
-            diy_code = raw_scene_code
-            effect = None
-        if scene_code is not None and matched_record is None:
-            latest_scene = self._deployments.latest_for_scene_code(config_entry_id, scene_code)
-            if (
-                latest_scene is not None
-                and latest_scene.phase is DeploymentPhase.CONFIRMED
-                and _scene_record_matches(coordinator, latest_scene, scene_code)
-            ):
-                matched_record = latest_scene
+        workspace_matches = active_workspace_matches(coordinator, workspace)
+        if (
+            workspace_matches
+            and workspace is not None
+            and isinstance(workspace.content, WorkshopEffect | PaletteDiyEffect)
+            and scene_code is not None
+            and workspace.observable_signature == f"scene-code:{scene_code}"
+        ):
+            mode, diy_code, effect = "custom", scene_code, None
+        verified_now = matched_record is not None
+        if matched_record is None and not workspace_matches:
+            latest = max(
+                (
+                    record
+                    for record in self._deployments.snapshot().records
+                    if record.config_entry_id == config_entry_id
+                    and _record_signature(record, coordinator.model) in observable_signatures
+                ),
+                key=lambda record: record.updated_at,
+                default=None,
+            )
+            if latest is not None and latest.phase is DeploymentPhase.CONFIRMED:
+                if latest.target_mode in {"music", "video"} or _activation_matches(coordinator, latest):
+                    matched_record = latest
         if matched_record is not None and matched_record.target_mode == ActivationMode.SCENE.value:
             observable_signature = f"scene-code:{scene_code}" if scene_code is not None else observable_signature
             if (
                 workspace is not None
                 and workspace.model == coordinator.model
+                and observable_signature is not None
                 and matched_record.target_effect is not None
                 and workspace.observable_signature
                 in {
@@ -924,43 +937,32 @@ class EffectDeploymentEngine:
                     f"scene:{matched_record.target_effect}",
                 }
             ):
-                workspace_matches = True
+                migrated_workspace = replace(workspace, observable_signature=observable_signature)
+                workspace_matches = active_workspace_matches(coordinator, migrated_workspace)
                 if (
-                    self._active_workspaces is not None
-                    and observable_signature is not None
+                    workspace_matches
+                    and self._active_workspaces is not None
                     and workspace.observable_signature != observable_signature
                 ):
-                    workspace = replace(workspace, observable_signature=observable_signature)
+                    workspace = migrated_workspace
                     self._active_workspaces.set(workspace)
-        if raw_scene_code is not None:
-            if matched_record is None and not workspace_matches:
-                latest = self._deployments.latest_for_diy_code(config_entry_id, raw_scene_code)
-                if latest is not None and latest.phase is DeploymentPhase.CONFIRMED:
-                    matched_record = latest
-            if matched_record is not None and matched_record.target_mode == ActivationMode.CUSTOM.value:
-                mode = "custom"
-                diy_code = raw_scene_code
-        if diy_code is not None and matched_record is None and not workspace_matches:
-            latest = self._deployments.latest_for_diy_code(config_entry_id, diy_code)
-            if latest is not None and latest.phase is DeploymentPhase.CONFIRMED:
-                matched_record = latest
-        if scene_code is None and effect is not None and matched_record is None and not workspace_matches:
-            latest = self._deployments.latest_for_effect(config_entry_id, effect)
-            if latest is not None and latest.phase is DeploymentPhase.CONFIRMED:
-                matched_record = latest
-        if mode in {"music", "video"} and matched_record is None and not workspace_matches:
-            latest = self._deployments.latest_for_profile(config_entry_id, mode)
-            if latest is not None and latest.phase is DeploymentPhase.CONFIRMED:
-                matched_record = latest
+        if matched_record is not None:
+            observable_signature = _record_signature(matched_record, coordinator.model)
+            if matched_record.target_mode == ActivationMode.CUSTOM.value:
+                mode, diy_code, effect = "custom", matched_record.diy_code, None
         profile_match = matched_record is not None and (
             (matched_record.content_kind == "music_profile" and mode == "music")
             or (matched_record.content_kind == "video_profile" and mode == "video")
         )
         if workspace_matches and matched_record is None:
             assert workspace is not None
-            confidence = workspace.confidence
+            confidence = (
+                ObservationConfidence.MODE_MATCH
+                if mode in {"music", "video"} and workspace.confidence is ObservationConfidence.SETTINGS_MATCH
+                else workspace.confidence
+            )
         elif profile_match and matched_record is not None:
-            confidence = matched_record.verification_confidence
+            confidence = matched_record.verification_confidence if verified_now else ObservationConfidence.MODE_MATCH
         elif diy_code is not None or effect is not None or scene_code is not None:
             confidence = (
                 ObservationConfidence.ACTIVATION_MATCH if matched_record is not None else ObservationConfidence.UNKNOWN
@@ -1073,15 +1075,42 @@ def _active_workspace_content(
     return decoded if type(decoded) is type(source) else source
 
 
+def active_workspace_matches(
+    coordinator: GoveeBLECoordinator,
+    workspace: ActiveEffectWorkspace | None,
+) -> bool:
+    """Match the exact selector without mistaking a shared scene code for content."""
+    if (
+        workspace is None
+        or workspace.model != coordinator.model
+        or workspace.observable_signature not in observable_signatures_for_coordinator(coordinator)
+    ):
+        return False
+    content = workspace.content
+    identity: tuple[int, int] | None
+    if isinstance(content, BuiltinScene | PaletteScene | LayeredScene):
+        identity = (content.template.scene_id, content.template.effect_id)
+    elif isinstance(content, LayeredEffect):
+        identity = get_profile(workspace.model).advanced_scene_carrier
+    else:
+        return True
+    resolved = None if identity is None else resolve_scene_identity(workspace.model, *identity)
+    if resolved is None:
+        return False
+    key, entry = resolved
+    scene_code = getattr(coordinator, "scene_code", None)
+    return (scene_code is None or scene_code == entry.code) and (
+        not scene_code_is_ambiguous(workspace.model, entry.code)
+        or coordinator.effect == canonical_scene_key(workspace.model, key)
+    )
+
+
 def observable_signature_for_coordinator(
     coordinator: GoveeBLECoordinator,
 ) -> str | None:
     scene_code = getattr(coordinator, "scene_code", None)
-    if scene_code is not None and coordinator.effect is not None:
+    if scene_code is not None:
         return f"scene-code:{scene_code}"
-    unknown_scene_code = coordinator.unknown_scene_code
-    if unknown_scene_code is not None:
-        return f"custom:{unknown_scene_code}"
     return observable_signature_for_state(
         coordinator,
         mode=_coordinator_mode(coordinator),
@@ -1093,12 +1122,16 @@ def observable_signature_for_coordinator(
 def observable_signatures_for_coordinator(
     coordinator: GoveeBLECoordinator,
 ) -> frozenset[str]:
+    if not coordinator.is_on:
+        return frozenset()
     signatures = {
         signature
         for signature in (
             observable_signature_for_coordinator(coordinator),
             (f"scene-code:{coordinator.scene_code}" if getattr(coordinator, "scene_code", None) is not None else None),
-            f"scene:{coordinator.effect}" if coordinator.effect is not None else None,
+            f"scene:{coordinator.effect}"
+            if coordinator.effect is not None and getattr(coordinator, "scene_code", None) is None
+            else None,
         )
         if signature is not None
     }
@@ -1124,87 +1157,89 @@ def _coordinator_mode(coordinator: GoveeBLECoordinator) -> str:
     return "colour"
 
 
-async def _async_refresh_profile(
-    coordinator: GoveeBLECoordinator,
-    compiled: CompiledMusicProfile | CompiledVideoProfile,
-) -> bool:
-    if isinstance(compiled, CompiledMusicProfile):
-        if protocol_model(compiled.model) == "H617A":
-            return await coordinator.refresh_state(
-                expected_on=True,
-                expected_music_mode=compiled.mode,
-            )
-        return await coordinator.refresh_state(
-            expected_on=True,
-            expected_music_mode=compiled.mode,
-            expected_music_sensitivity=compiled.sensitivity,
-            expected_music_calm=compiled.calm if compiled.mode == "rhythm" else None,
-            expected_music_color=compiled.colour,
-            expected_music_auto_color=compiled.colour is None,
-        )
-    profile = coordinator.profile
-    expectations: dict[str, Any] = {
-        "expected_on": True,
-        "expected_video_mode": compiled.mode,
-    }
-    if profile.supports_video_capture_region:
-        expectations["expected_video_full_screen"] = compiled.full_screen
-    if profile.supports_video_saturation:
-        expectations["expected_video_saturation"] = compiled.saturation
-    if profile.supports_video_sound_effects:
-        expectations["expected_video_sound_effects"] = compiled.sound_effects
-        expectations["expected_video_sound_effects_softness"] = compiled.sound_effects_softness
-    if profile.supports_white_balance:
-        if compiled.white_balance_position is None:
-            raise ValueError("video profile is missing white balance")
-        red, blue = WHITE_BALANCE_POSITIONS[compiled.white_balance_position - 1]
-        expectations["expected_white_balance"] = (red, blue)
-    if profile.supports_blank_screen:
-        expectations["expected_blank_screen"] = compiled.blank_screen
-    if profile.supports_relative_brightness:
-        expectations["expected_relative_brightness"] = compiled.relative_brightness
-    return await coordinator.refresh_state(**expectations)
-
-
-def _profile_verification_confidence(
-    compiled: CompiledMusicProfile | CompiledVideoProfile,
-) -> ObservationConfidence:
-    if isinstance(compiled, CompiledMusicProfile) and protocol_model(compiled.model) == "H617A":
-        return ObservationConfidence.MODE_MATCH
-    if isinstance(compiled, CompiledVideoProfile):
-        profile = get_profile(compiled.model)
-        if not (
-            profile.supports_video_capture_region
-            or profile.supports_video_saturation
-            or profile.supports_video_sound_effects
-            or profile.supports_white_balance
-            or profile.supports_relative_brightness
-            or profile.supports_blank_screen
+def compiled_observation(
+    compiled: CompiledApplication,
+    *,
+    profile: ModelProfile | None = None,
+) -> tuple[dict[str, Any] | None, ObservationConfidence]:
+    """Fields with evidenced readback, independent of the write grammar."""
+    profile = get_profile(compiled.model) if profile is None else profile
+    if not profile.can_read(ReadDomain.POWER) or not profile.supports_color_mode_readback:
+        return None, ObservationConfidence.UNKNOWN
+    expectations: dict[str, Any] = {"is_on": True}
+    if isinstance(compiled, CompiledEffect):
+        expectations["diy_code" if compiled.selector_kind == "diy" else "scene_code"] = compiled.diy_code
+        if (
+            compiled.activation_mode is ActivationMode.SCENE
+            and compiled.diy_code is not None
+            and compiled.expected_effect is not None
+            and scene_code_is_ambiguous(compiled.model, compiled.diy_code)
         ):
-            return ObservationConfidence.MODE_MATCH
-    return ObservationConfidence.SETTINGS_MATCH
+            expectations["effect"] = canonical_scene_key(compiled.model, compiled.expected_effect)
+        return expectations, ObservationConfidence.ACTIVATION_MATCH
+    if isinstance(compiled, CompiledMusicProfile):
+        expectations["music_mode"] = compiled.mode
+        # H617A settings are not confirmed by the shipped readback evidence.
+        if profile.status_grammar == "H6199":
+            expectations["music_sensitivity"] = compiled.sensitivity
+            expectations["music_color"] = compiled.colour
+            if compiled.mode == "rhythm":
+                expectations["music_calm"] = compiled.calm
+    else:
+        expectations["video_mode"] = compiled.mode
+        if profile.status_grammar == "H6199":
+            if profile.supports_video_capture_region:
+                expectations["video_full_screen"] = compiled.full_screen
+            if profile.supports_video_saturation:
+                expectations["video_saturation"] = compiled.saturation
+            if profile.supports_video_sound_effects:
+                expectations["video_sound_effects"] = compiled.sound_effects
+                expectations["video_sound_effects_softness"] = compiled.sound_effects_softness
+            if profile.supports_white_balance and profile.can_read(ReadDomain.DISPLAY_SETTING):
+                if compiled.white_balance_position is None:
+                    raise ValueError("video profile is missing white balance")
+                red, blue = WHITE_BALANCE_POSITIONS[compiled.white_balance_position - 1]
+                expectations["white_balance_red"] = red
+                expectations["white_balance_blue"] = blue
+            if profile.supports_blank_screen and profile.can_read(ReadDomain.DISPLAY_SETTING):
+                expectations["blank_screen"] = compiled.blank_screen
+            if profile.supports_relative_brightness and profile.can_read(ReadDomain.RELATIVE_BRIGHTNESS):
+                if compiled.relative_brightness is None:
+                    raise ValueError("video profile is missing relative brightness")
+                left, top, right, bottom = compiled.relative_brightness
+                expectations["relative_brightness"] = left if len(set(compiled.relative_brightness)) == 1 else None
+                expectations["relative_brightness_left"] = left
+                expectations["relative_brightness_top"] = top
+                expectations["relative_brightness_right"] = right
+                expectations["relative_brightness_bottom"] = bottom
+    confidence = ObservationConfidence.SETTINGS_MATCH if len(expectations) > 2 else ObservationConfidence.MODE_MATCH
+    return expectations, confidence
 
 
-def resolve_diy_code(
-    item: LibraryItem,
-    requested: int | None = None,
-) -> int | None:
-    content = item.content
-    if isinstance(content, MusicProfile | VideoProfile):
-        if requested is not None:
-            raise ValueError("profiles do not use a DIY code")
+def observable_signature_for_compiled(compiled: CompiledApplication) -> str | None:
+    if isinstance(compiled, CompiledEffect):
+        if compiled.diy_code is None:
+            return None
+        domain = "custom" if compiled.selector_kind == "diy" else "scene-code"
+        return f"{domain}:{compiled.diy_code}"
+    return f"{'music' if isinstance(compiled, CompiledMusicProfile) else 'video'}:{compiled.mode}"
+
+
+def _record_signature(record: DeploymentRecord, model: str) -> str | None:
+    if record.target_model is not None and record.target_model != model:
         return None
-    if isinstance(content, WorkshopEffect):
-        expected = workshop_apply_code(content.model)
-        if requested is not None and requested != expected:
-            raise ValueError("Workshop activation slot does not match the evidenced model slot")
-        return expected
-    if isinstance(content, PaintedEffect):
-        return 800 if requested is None else requested
-    if isinstance(content, SingleEffect | MultiEffect):
-        return H617A_TYPE04_APPLY_CODE if requested is None else requested
-    if isinstance(content, PaletteDiyEffect):
-        return H6199_PALETTE_DIY_APPLY_CODE if requested is None else requested
+    if record.observable_signature is not None:
+        return record.observable_signature
+    # Old records only identify a selector when their shipped content route is known.
+    if record.target_mode == "scene":
+        return f"scene-code:{record.diy_code}" if record.diy_code is not None else f"scene:{record.target_effect}"
+    if record.target_mode == "custom" and record.diy_code is not None:
+        if record.content_kind in {"h617a_painted", "h617a_single", "h617a_multi"} and model in {"H617A", "H617E"}:
+            return f"custom:{record.diy_code}"
+        if (record.content_kind == "workshop" and model in {"H617A", "H617E", "H6199"}) or (
+            record.content_kind == "palette_diy" and model == "H6199"
+        ):
+            return f"scene-code:{record.diy_code}"
     return None
 
 
@@ -1214,12 +1249,15 @@ def _activation_matches(
 ) -> bool:
     if not coordinator.is_on:
         return False
+    signature = _record_signature(record, getattr(coordinator, "model", ""))
+    if signature is None:
+        return False
     if record.target_mode == ActivationMode.SCENE.value:
         scene_code = getattr(coordinator, "scene_code", None)
         if scene_code is not None:
             return _scene_record_matches(coordinator, record, scene_code)
         return record.target_effect is not None and coordinator.effect == record.target_effect
-    return coordinator.diy_code == record.diy_code or coordinator.unknown_scene_code == record.diy_code
+    return signature in observable_signatures_for_coordinator(coordinator)
 
 
 def _scene_record_matches(

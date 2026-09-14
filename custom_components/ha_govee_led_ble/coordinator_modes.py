@@ -8,6 +8,7 @@ from .const import MUSIC_MODE_SLUGS
 from .control_arbiter import ControlIntent, async_control_intent
 from .coordinator_base import _CoordinatorBase
 from .coordinator_status import ParsedMode
+from .effect_contracts import CapabilityWorkflow, require_effect_route
 from .generated_protocol_adapter import build_music_mode, build_power
 from .light_commands import (
     build_color_rgb,
@@ -203,6 +204,7 @@ class _ActiveModeMixin(_CoordinatorBase):
     ) -> None:
         if not self.profile.supports_scenes:
             raise ValueError(f"{self.model} does not support native scenes")
+        require_effect_route(self.model, CapabilityWorkflow.NATIVE_SCENES)
         if scene_entry is None:
             scene_name = canonical_scene_key(self.model, scene_name)
             scene = MODEL_SCENES[self.model].get(scene_name)
