@@ -66,7 +66,7 @@ Use **Reconfigure** to correct the selected model while preserving the existing 
 
 ## Scope, non-goals, and expert tools
 
-The maintained product scope and per-model limitations are defined by the [device support table](#device-support).  H617A stores a gradual-colour-change boolean, but the app classifies the model as unsupported and physical comparisons found no visible effect, so the integration exposes no user-facing behaviour for it.
+The maintained product scope and per-model limitations are defined by the [device support table](#device-support) and [global scope policy](docs/scope-policy.md).  H617A stores a gradual-colour-change boolean, but the app classifies the model as unsupported and physical comparisons found no visible effect, so the integration exposes no user-facing behaviour for it.
 
 Wi-Fi provisioning is not a maintained integration or contributor workflow.  The decoded H6199 [`a1 11` frame](tools/ble/kaitai/h6199_wifi_provision.ksy), [reassembled body](tools/ble/kaitai/h6199_wifi_body.ksy) and [`ee 11` result](tools/ble/kaitai/h6199_wifi_result.ksy) remain as tested protocol findings.
 

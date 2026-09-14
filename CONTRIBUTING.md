@@ -159,17 +159,28 @@ promotion.
 
 ## Repository non-goals
 
-The repository may retain Kaitai schemas and protocol findings for excluded runtime features.  It does not expose:
+These exclusions apply globally to every model, including Experimental profiles,
+services, Effect Studio, queries, and recovery. App availability or known BLE
+encoding does not override them. See [scope policy and evidence](docs/scope-policy.md).
+The repository may retain decode-only Kaitai documentation and protocol findings
+for excluded features; this does not authorize runtime control. It does not expose:
 
+- AI filters, including their BLE selectors, configuration, and readback;
 - Wi-Fi provisioning, cloud control, or account and network setup;
-- user-facing on-device timers or schedules;
-- host microphone capture or audio-derived control;
+- on-device timers, countdowns, or schedules; use Home Assistant automations instead;
+- phone or host microphone capture, injection, or audio-derived control;
 - continuous host-driven BLE streaming for real-time audio or animation;
-- firmware or OTA updates;
+- firmware or OTA updates, for device safety;
 - manufacturer-style animated scene previews; or
 - camera calibration that depends on Govee Wi-Fi or cloud services.
 
 Onboard device-microphone modes, ordinary BLE commands, and bounded multipart effect uploads remain in scope.
+BLE installation direction and white balance are not excluded by the cloud camera
+image-calibration non-goal; qualify each independently using exact-model evidence.
+Known Wi-Fi provisioning and onboard-timer layouts belong in Kaitai documentation,
+not runtime provisioning, cloud communication, timer queries, or timer writes.
+Keep new excluded-feature speculative roots out of the runtime root list and
+runtime imports. Unknown layouts remain documented gaps, not invented schemas.
 
 ## Validation
 
