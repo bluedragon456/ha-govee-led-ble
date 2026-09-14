@@ -1558,6 +1558,16 @@ def test_registers_light_services_during_integration_setup():
         "set_segment_color",
         "set_installation_direction",
         "read_installation_controls",
+        "replace_dreamview_group",
+        "delete_dreamview_group",
+        "read_dreamview_group",
+        "set_dreamview_switch",
+        "set_dreamview_member_brightness",
+        "set_dreamview_same_brightness",
+        "set_dreamview_member_connect",
+        "set_dreamview_saturation",
+        "set_dreamview_sample",
+        "set_dreamview_sound_effects",
     }
 
 

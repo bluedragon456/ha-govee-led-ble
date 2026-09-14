@@ -4,6 +4,8 @@ diy_type04
 speculative/govee_encryption
 speculative/h6099_command_write
 speculative/h6099_command_ack
+speculative/h6099_dreamview_frame
+speculative/h6099_dreamview_group
 speculative/h6099_effect_upload
 speculative/h6099_music_parameters
 speculative/h6099_status_query

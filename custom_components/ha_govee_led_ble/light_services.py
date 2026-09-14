@@ -16,6 +16,7 @@ from homeassistant.helpers.typing import VolDictType
 from .const import DOMAIN
 from .control_arbiter import ControlIntent, async_control_intent
 from .coordinator import GoveeBLECoordinator
+from .dreamview_services import async_register_dreamview_services
 from .generated_protocol_adapter import build_power, build_video_mode
 from .h6099_controls import (
     async_read_installation_controls,
@@ -83,6 +84,7 @@ def async_register_light_services(hass: HomeAssistant) -> None:
         schema={},
         supports_response=SupportsResponse.ONLY,
     )
+    async_register_dreamview_services(hass)
     for name, schema, method in (
         ("paint_segments", _PAINT_SEGMENTS_SCHEMA, "async_paint_segments"),
         ("set_segment_color", _SET_SEGMENT_COLOR_SCHEMA, "async_set_segment_color"),

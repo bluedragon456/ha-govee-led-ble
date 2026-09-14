@@ -136,6 +136,7 @@ def _make_coord(**ov) -> MagicMock:
         black_border=None,
         installation_direction=None,
         camera_health="unknown",
+        _dreamview_last_write="unknown",
         blank_screen_detection=2,
         blank_screen_low_brightness_duration_seconds=10,
         blank_screen_same_tone_duration_seconds=120,

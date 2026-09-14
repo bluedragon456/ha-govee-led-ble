@@ -11,12 +11,20 @@ Local BLE control and effect authoring for supported Govee lights from Home Assi
 
 | Model | Status | Controls and limitations |
 | --- | --- | --- |
+| **H6099** | Experimental | Exact-model candidate: basic light controls, 14 logical zones, 240 scenes, Basic/Mixed/Graffiti DIY, video and onboard music, plus service-only installation controls and DreamView. [Implemented behaviour, evidence, and limits](docs/h6099-support.md); owner qualification is outstanding. |
 | **H617A** | Supported | Power, brightness, RGB, colour temperature, 15 segments, 83 scenes, 11 music modes and Effect Studio |
 | **H6199** | Supported | Power, brightness, RGB, colour temperature, 15 segments, 240 scenes, video and music modes, advanced controls and Effect Studio |
 | **H617E** | Compatible | H617A-compatible controls, effects and music modes with its exact 240-scene catalogue and retained legacy scene-name compatibility; exact-model protocol documentation remains incomplete |
 | **H6076** | Partial | Power, brightness, RGB and 2700–6500 K colour temperature; colour-mode readback, segments, scenes, music and Effect Studio remain unavailable |
 
 **Experimental** is a model-specific prerelease awaiting owner confirmation.  **Partial** has confirmed controls plus known disabled gaps.  **Compatible** has no known issue in its exposed feature set but incomplete documentation.  **Supported** is fully documented, with every known feature implemented or explicitly excluded and evidence-backed Kaitai coverage for every enabled wire path.  See [CONTRIBUTING.md](CONTRIBUTING.md) for the request, speculative-schema, prerelease and promotion process.
+
+H6099 uses exact Android 7.6.01 app-derived hypotheses, not an H6199 profile
+alias. Graffiti and dependent music parameters require discovered physical IC
+count; black-border removal requires Wi-Fi software 1.00.11 or newer. Advanced
+and Workshop remain unavailable, music companion readback is not guaranteed,
+and DreamView membership is locally authored and unconfirmed. See the
+[H6099 support record](docs/h6099-support.md) for the full scope and remaining gaps.
 
 ## Effect Studio
 

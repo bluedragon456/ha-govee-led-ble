@@ -29,6 +29,7 @@ from .const import (
     get_profile,
 )
 from .control_arbiter import BLEControlArbiter, ControlIntent, PreviewAdmission, async_control_intent
+from .coordinator_dreamview import _DreamviewMixin
 from .coordinator_expectations import expectations_from_packet
 from .coordinator_modes import PreModeSnapshot, _ActiveModeMixin
 from .coordinator_status import ParsedMode, StatusDomain, decode_status_frame_result, parse_color_mode
@@ -130,7 +131,7 @@ _COLOR_EXPECTATION_FIELDS = frozenset(
 _OPTIONAL_CONTROL_DOMAINS = frozenset({ReadDomain.INSTALLATION_DIRECTION, ReadDomain.CAMERA_HEALTH})
 
 
-class GoveeBLECoordinator(_ActiveModeMixin):
+class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
     """Manages BLE connection lifecycle for a Govee device."""
 
     def __init__(
@@ -251,6 +252,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
         self._present = False
         self._first_refresh_done = False
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._handle_hass_stop)
+        self._init_dreamview()
 
     @property
     def device_info(self) -> dr.DeviceInfo:
@@ -1144,6 +1146,11 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 return
             frame = decoded_frame
         self._last_rx_monotonic = time.monotonic()
+        if self._handle_dreamview_notification(frame):
+            self._record_packet(
+                "rx", frame, outcome="parsed", reason="dreamview_status_parsed", parser="h6099_dreamview_frame"
+            )
+            return
         if frame[:1] == b"\x33":
             command = parse_command_ack_result(frame, self.model)
             reason = "command_ack_parsed"
@@ -1165,7 +1172,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 self.model,
                 command.parser,
                 outcome,
-                frame.hex(),
+                "" if self._dreamview_private_write else frame.hex(),
             )
             return
         result = decode_status_frame_result(frame, self.model)
@@ -1185,7 +1192,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 self.model,
                 result.parser,
                 reason,
-                frame.hex(),
+                "" if self._dreamview_private_write else frame.hex(),
             )
             return
         domain, payload = decoded.domain, decoded.payload
@@ -1198,7 +1205,12 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             parser=result.parser,
             domain=decoded.raw_domain,
         )
-        _LOGGER.debug("rx %s domain=0x%02x payload=%s", self.model, decoded.raw_domain, payload.hex())
+        _LOGGER.debug(
+            "rx %s domain=0x%02x payload=%s",
+            self.model,
+            decoded.raw_domain,
+            "" if self._dreamview_private_write else payload.hex(),
+        )
         try:
             observed: tuple[str, ...] = ()
             if domain is StatusDomain.POWER:
@@ -1325,7 +1337,7 @@ class GoveeBLECoordinator(_ActiveModeMixin):
                 "Rejected %s status frame parser=%s reason=semantic_rejected raw=%s",
                 self.model,
                 result.parser,
-                frame.hex(),
+                "" if self._dreamview_private_write else frame.hex(),
             )
 
     async def _async_write_packet(
@@ -2237,7 +2249,8 @@ class GoveeBLECoordinator(_ActiveModeMixin):
             "outcome": outcome,
             "reason": reason,
             "parser": parser,
-            "raw": data[:PACKET_LOG_RAW_BYTES_LIMIT].hex(),
+            "raw": "" if self._dreamview_private_write else data[:PACKET_LOG_RAW_BYTES_LIMIT].hex(),
+            "redacted": self._dreamview_private_write,
             "truncated": len(data) > PACKET_LOG_RAW_BYTES_LIMIT,
         }
         self.packet_log.append(entry)

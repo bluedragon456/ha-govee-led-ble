@@ -34,3 +34,60 @@ apply_custom_effect:
       selector: {text:}
     effect_id:
       selector: {text:}
+replace_dreamview_group:
+  name: Replace DreamView Group
+  description: Replace H6099 membership and Area Config. Previous device membership cannot be read or recovered. Local authored metadata is not confirmed membership. Supply known cmd_ver and is_rgbic, exactly one address or name, and zones (wire 1..10, 0 unassigned, 255 disabled). Maximum seven members. No command-version defaults.
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+  fields:
+    members: {required: true, selector: {object:}}
+delete_dreamview_group:
+  name: Delete DreamView Group
+  description: Explicitly delete the H6099 group. Retain local authored metadata for manual recovery; deletion cannot be confirmed by membership readback.
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+read_dreamview_group:
+  name: Read DreamView Group
+  description: Return local authored metadata separately from anonymous observations. Missing replies and zero slots do not prove absent membership. Response contains private locally supplied identities; do not share unredacted.
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+set_dreamview_switch:
+  name: Set DreamView Switch
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+  fields:
+    enabled: {required: true, selector: {boolean:}}
+set_dreamview_member_brightness:
+  name: Set DreamView Member Brightness
+  description: Set one zero-based slot. Per-member levels may not apply while same brightness is enabled. Slot identity is not read back.
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+  fields:
+    index: {required: true, selector: {number: {min: 0, max: 6, step: 1}}}
+    level: {required: true, selector: {number: {min: 0, max: 100, step: 1}}}
+set_dreamview_same_brightness:
+  name: Set DreamView Same Brightness
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+  fields:
+    enabled: {required: true, selector: {boolean:}}
+set_dreamview_member_connect:
+  name: Set DreamView Member Connection
+  description: Explicitly connect or disconnect an anonymous zero-based slot. Does not identify or remove membership.
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+  fields:
+    index: {required: true, selector: {number: {min: 0, max: 6, step: 1}}}
+    connected: {required: true, selector: {boolean:}}
+set_dreamview_saturation:
+  name: Set DreamView Saturation
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+  fields:
+    saturation: {required: true, selector: {number: {min: 0, max: 100, step: 1}}}
+set_dreamview_sample:
+  name: Set DreamView Sample Bytes
+  description: Supply both raw sample bytes explicitly. Their UI labels are unqualified; neither byte is inferred or reset from a default.
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+  fields:
+    sample_first: {required: true, selector: {number: {min: 0, max: 255, step: 1}}}
+    sample_second: {required: true, selector: {number: {min: 0, max: 255, step: 1}}}
+set_dreamview_sound_effects:
+  name: Set DreamView Sound Effects
+  description: Supply enabled and softness explicitly; no unproven digest is queried to fill omitted values.
+  target: {entity: {integration: ha_govee_led_ble, domain: light}}
+  fields:
+    enabled: {required: true, selector: {boolean:}}
+    softness: {required: true, selector: {number: {min: 0, max: 100, step: 1}}}

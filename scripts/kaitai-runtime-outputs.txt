@@ -8,6 +8,8 @@ govee_segment_page.py
 govee_shared.py
 h6099_command_write.py
 h6099_command_ack.py
+h6099_dreamview_frame.py
+h6099_dreamview_group.py
 h6099_effect_upload.py
 h6099_music_parameters.py
 h6099_status_query.py

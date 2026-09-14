@@ -110,6 +110,7 @@ class ModelProfile:
     # Effect semantics require evidence independent of basic command compatibility.
     effect_grammar: str | None = None
     video_grammar: str | None = None
+    dreamview_max_sub_devices: int = 0
     video_firmware_conditions: tuple[VideoFirmwareCondition, ...] = ()
     read_domains: frozenset[ReadDomain] = frozenset()
     setup_required_read_domains: frozenset[ReadDomain] = frozenset()
@@ -347,6 +348,7 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         status_grammar="H6099",
         effect_grammar="H6099",
         video_grammar="H6099",
+        dreamview_max_sub_devices=7,
         video_firmware_conditions=(VideoFirmwareCondition("black_border", "subordinate_21_version", "1.00.11"),),
         read_domains=frozenset(
             {
