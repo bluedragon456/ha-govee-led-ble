@@ -263,6 +263,9 @@ async def test_apply_active_video_mode_noop_when_video_off(coord):
 
 
 async def test_apply_active_video_mode_requires_readback(h6199):
+    from tests.test_h6199_capabilities import QUALIFIED
+
+    vars(h6199).update(QUALIFIED)
     h6199.is_on = True
     values = {"full_screen": False, "saturation": 63, "sound_effects": True, "sound_effects_softness": 27}
     client = MagicMock(is_connected=True, write_gatt_char=AsyncMock())

@@ -143,29 +143,68 @@ async def _send_video_setting(
 
 async def apply_white_balance(
     coordinator: GoveeBLECoordinator,
-    expected: tuple[int, ...],
+    expected: tuple[int, ...] | None,
     *,
     writer: ProfileWriter | None = None,
     verify: bool = True,
+    flag: int = 1,
 ) -> bool:
+    """Author manual gains, restore an explicit flag, or reset to freshly reported defaults with None."""
     require_video_controls(coordinator.profile, coordinator, ("white_balance",))
     scalar = coordinator.profile.video_white_balance_representation == "scalar"
+    reset_fields = ("white_balance_default_flag", "white_balance_default_red", "white_balance_default_blue")
+    reset = expected is None
+    if reset:
+        if scalar:
+            raise ValueError("Scalar white balance requires an explicit value")
+        baselines = {field: coordinator._field_revisions.get(field, 0) for field in reset_fields}
+        if not await coordinator.refresh_state(refresh_display_settings=frozenset({"white_balance"})) or any(
+            coordinator._field_revisions.get(field, 0) <= revision for field, revision in baselines.items()
+        ):
+            raise ValueError("White-balance defaults have not been read freshly; refresh the device first")
+        defaults = tuple(getattr(coordinator, field) for field in reset_fields)
+        if any(value is None for value in defaults):
+            raise ValueError("White-balance defaults are incomplete")
+        flag, red, blue = defaults
+        expected = (red, blue)
+        client, token = coordinator._client, coordinator._notification_token
+
+    def check_defaults() -> None:
+        if reset and (
+            tuple(getattr(coordinator, field) for field in reset_fields) != defaults
+            or coordinator._client is not client
+            or coordinator._notification_token is not token
+        ):
+            raise ValueError("White-balance defaults changed before reset; refresh and retry")
+
+    assert expected is not None
     fields: dict[str, int] = dict(
         zip(("white_balance_scalar",) if scalar else ("white_balance_red", "white_balance_blue"), expected, strict=True)
     )
-    packet = build_white_balance(expected[0], expected[-1] if len(expected) == 2 else None, coordinator.model)
+    if not scalar:
+        fields["white_balance_flag"] = flag
+    packet = build_white_balance(
+        expected[0], expected[-1] if len(expected) == 2 else None, coordinator.model, flag=flag
+    )
     for _ in range(2 if verify else 1):
         await _send_video_setting(
             coordinator,
             packet,
             frozenset({"white_balance"}),
             writer=writer,
+            write_guard=check_defaults,
             state_values=fields,
             expected_values=fields if verify else None,
         )
         if not verify:
             return True
-        if await coordinator.refresh_state(expected_white_balance=expected):
+        confirmed = (
+            await coordinator.refresh_state(expected_white_balance=expected)
+            if scalar
+            else await coordinator.refresh_state(expected_white_balance=expected, expected_white_balance_flag=flag)
+        )
+        if confirmed:
+            check_defaults()
             return True
     raise RuntimeError("White-balance write was not confirmed by the device")
 

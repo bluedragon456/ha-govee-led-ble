@@ -1168,6 +1168,9 @@ async def test_snapshot_profile_previews_use_preview_transport(
     coordinator._client = MagicMock(is_connected=True, write_gatt_char=AsyncMock())
     if model == "H6199":
         from tests.test_h6099 import frame
+        from tests.test_h6199_capabilities import QUALIFIED
+
+        vars(coordinator).update(QUALIFIED)
 
         async def fresh_policy(**kwargs):
             assert kwargs == {"refresh_display_settings": frozenset({"blank_screen"})}
@@ -1219,7 +1222,10 @@ async def test_snapshot_profile_previews_use_preview_transport(
                 "music_mode": "off",
                 "diy_code": None,
             },
-            dict(zip(("white_balance_red", "white_balance_blue"), compiled.white_balance_wire, strict=True)),
+            {
+                **dict(zip(("white_balance_red", "white_balance_blue"), compiled.white_balance_wire, strict=True)),
+                "white_balance_flag": 1,
+            },
             {
                 "relative_brightness": None,
                 "relative_brightness_left": 80,

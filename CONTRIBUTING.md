@@ -137,6 +137,16 @@ packet captures, diagnostics exports, or a second protocol representation.
 
 Do not add offsets, command literals, or packet enums to entity or coordinator code.
 
+Review the complete semantic path, not just generated packet equality:
+named fields -> observations -> sibling preservation -> persisted recovery ->
+generated writes -> fresh verification. Classify each relevant field as
+applied, preserved, decode-only, or unknown. Include a differential replay when
+two replies differ only in a mode/flag that recovery must retain. Legacy missing
+fields stay unknown; restored values never become fresh observations. Test
+partial writes and complete-but-mismatched readback, not only missing replies.
+Keep every investigation finding in its verification ledger, including deferred
+paths and the evidence or approval needed to qualify them.
+
 ## Exact-SKU scene catalogues
 
 Scene catalogues come from Govee's exact-SKU catalogue endpoint through the existing repository tool:

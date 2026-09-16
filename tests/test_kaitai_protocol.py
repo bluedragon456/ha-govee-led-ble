@@ -103,6 +103,29 @@ def _parse(root_type: type[Any], data: bytes) -> Any:
     return parsed
 
 
+def test_h6199_direct_register_extensions_not_app_captures() -> None:
+    diy = _parse(H6199StatusReply, bytes.fromhex("aa050afe0000000000000000000000000000005b"))
+    assert diy.body.mode.name == "diy" and diy.body.detail.code == 254
+    static = _parse(H6199StatusReply, bytes.fromhex("aa051501000000000000000000000000000000bb"))
+    assert static.body.detail.gradient == 1
+    for raw, domain, value in (
+        ("aa3001000000000000000000000000000000009b", "strip_direction", 1),
+        ("aa3101000000000000000000000000000000009a", "camera_position", 1),
+        ("aa32010000000000000000000000000000000099", "camera_status", 1),
+        ("aaa3010000000000000000000000000000000008", "gradient", 1),
+    ):
+        packet = bytes.fromhex(raw)
+        assert xor_checksum(packet[:-1]) == packet[-1]
+        parsed = _parse(H6199StatusReply, packet)
+        assert parsed.domain.name == domain and parsed.body.value == value
+    for raw, opcode in (
+        ("3330000000000000000000000000000000000003", "strip_direction"),
+        ("3331000000000000000000000000000000000002", "camera_position"),
+        ("33a3000000000000000000000000000000000090", "gradient"),
+    ):
+        assert _parse(H6199CommandAck, bytes.fromhex(raw)).opcode.name == opcode
+
+
 @pytest.fixture
 def static_coordinator(hass, monkeypatch):
     if not _GENERATED_DIR:
@@ -580,11 +603,13 @@ async def test_failed_segment_write_preserves_fresh_static_provenance(static_coo
     coord = static_coordinator
     coord.install_static_color(rgb=(9, 8, 7))
 
-    async def send(_packet):
+    async def send(_packet, *, write_guard):
+        write_guard()
         coord._notify_callback(None, _static_reply(rgb=(1, 2, 3), kelvin=kelvin))
         raise RuntimeError("segment write failed after notification")
 
     coord.send_command = AsyncMock(side_effect=send)
+    coord.async_refresh_segments = AsyncMock(return_value=False)
     with pytest.raises(RuntimeError, match="segment write failed"):
         await coord.async_paint_segments([([1], (4, 5, 6))])
     assert coord.rgb_color_source == "observed"

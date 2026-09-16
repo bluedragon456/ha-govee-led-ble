@@ -936,7 +936,14 @@ class EffectDeploymentEngine:
             required.extend(
                 (coordinator.white_balance_scalar,)
                 if profile.video_white_balance_representation == "scalar"
-                else (coordinator.white_balance_red, coordinator.white_balance_blue)
+                else (
+                    coordinator.white_balance_flag,
+                    coordinator.white_balance_red,
+                    coordinator.white_balance_blue,
+                    coordinator.white_balance_default_flag,
+                    coordinator.white_balance_default_red,
+                    coordinator.white_balance_default_blue,
+                )
             )
         if compiled.relative_brightness is not None:
             required.extend(
@@ -953,6 +960,12 @@ class EffectDeploymentEngine:
             )
         if any(value is None for value in required):
             raise RuntimeError("The current video settings are incomplete")
+        if (
+            compiled.white_balance_wire is not None
+            and profile.video_white_balance_representation == "position"
+            and coordinator.white_balance_flag not in (0, 1)
+        ):
+            raise RuntimeError("The current white-balance mode cannot be safely restored")
         return True
 
     def _capture_prior_state(
@@ -1011,6 +1024,10 @@ class EffectDeploymentEngine:
             video_sound_effects_softness=getattr(coordinator, "video_sound_effects_softness", 100),
             white_balance_red=getattr(coordinator, "white_balance_red", None),
             white_balance_blue=getattr(coordinator, "white_balance_blue", None),
+            white_balance_flag=getattr(coordinator, "white_balance_flag", None),
+            white_balance_default_flag=getattr(coordinator, "white_balance_default_flag", None),
+            white_balance_default_red=getattr(coordinator, "white_balance_default_red", None),
+            white_balance_default_blue=getattr(coordinator, "white_balance_default_blue", None),
             white_balance_scalar=getattr(coordinator, "white_balance_scalar", None),
             relative_brightness=getattr(coordinator, "relative_brightness", None),
             relative_brightness_left=getattr(coordinator, "relative_brightness_left", None),
@@ -1356,6 +1373,8 @@ def compiled_observation(
                     else ("white_balance_red", "white_balance_blue")
                 )
                 expectations.update(zip(fields, compiled.white_balance_wire, strict=True))
+                if profile.video_white_balance_representation == "position":
+                    expectations["white_balance_flag"] = 1
             else:
                 complete = False
         if compiled.blank_screen is not None:

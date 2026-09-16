@@ -4,8 +4,12 @@ meta:
   endian: le
   imports:
     - govee_shared
+    - speculative/h6199_control_payload
 doc: |
   H6199 20-byte command frame. The final byte is the XOR of bytes 0 through 18.
+  Issue #294 DIY0a, direction30, position31 and Gradient A3 extensions are
+  speculative exact-model APK/direct-register evidence, not official-app captures;
+  their payloads remain in speculative/h6199_control_payload.ksy.
 seq:
   - id: header
     contents: [0x33]
@@ -22,6 +26,9 @@ seq:
         'command_op::mode': mode_body
         'command_op::display_setting': display_setting_body
         'command_op::relative_brightness': relative_brightness_body
+        'command_op::strip_direction': h6199_control_payload::write_value
+        'command_op::camera_position': h6199_control_payload::write_value
+        'command_op::gradient': h6199_control_payload::write_value
   - id: checksum
     type: u1
 enums:
@@ -29,11 +36,15 @@ enums:
     0x01: power
     0x04: brightness
     0x05: mode
+    0x30: strip_direction
+    0x31: camera_position
+    0xa3: gradient
     0xa9: display_setting
     0xae: relative_brightness
   mode_sel:
     0x00: video
     0x04: scene
+    0x0a: diy
     0x15: static_colour
     0x13: music
   video_source:
@@ -80,6 +91,7 @@ types:
             'mode_sel::scene': scene_body
             'mode_sel::static_colour': static_colour_body
             'mode_sel::music': music_body
+            'mode_sel::diy': h6199_control_payload::diy_selector
   scene_body:
     seq:
       - id: scene_id

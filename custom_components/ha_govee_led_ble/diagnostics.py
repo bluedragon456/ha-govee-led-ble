@@ -11,6 +11,7 @@ from .coordinator import PACKET_LOG_LIMIT, PACKET_LOG_RAW_BYTES_LIMIT
 from .effect_contracts import diagnostics_release_capabilities
 from .effect_diagnostics import empty_effect_diagnostic_snapshot
 from .h6199_calibration import WHITE_BALANCE_POSITIONS
+from .video_applicability import h6199_camera_controls_state, video_control_states
 
 REDACT_KEYS = {"address", "unique_id"}
 
@@ -35,11 +36,7 @@ async def async_get_config_entry_diagnostics(
     client = coordinator._client
     lock = coordinator._lock
     expected_brightness = coordinator._expected_state.get("brightness_pct")
-    white_balance = (
-        (coordinator.white_balance_red, coordinator.white_balance_blue)
-        if coordinator.white_balance_red is not None and coordinator.white_balance_blue is not None
-        else None
-    )
+    white_balance = coordinator.white_balance
     coordinator_data = {
         "address": coordinator.address,
         "model": coordinator.model,
@@ -63,6 +60,10 @@ async def async_get_config_entry_diagnostics(
         "supports_color_mode_readback": coordinator.profile.supports_color_mode_readback,
         "supports_custom_effects": coordinator.profile.supports_custom_effects,
         "supports_video_mode": coordinator.profile.supports_video_mode,
+        "video_control_states": {
+            control: state.value for control, state in video_control_states(coordinator.profile, coordinator).items()
+        },
+        "h6199_camera_controls_state": h6199_camera_controls_state(coordinator.model, coordinator).value,
         "video_modes": list(coordinator.profile.video_modes),
         "supports_video_capture_region": coordinator.profile.supports_video_capture_region,
         "supports_video_saturation": coordinator.profile.supports_video_saturation,
@@ -84,6 +85,8 @@ async def async_get_config_entry_diagnostics(
         "hw_version": coordinator.hw_version,
         "subordinate_20_version": coordinator.subordinate_20_version,
         "subordinate_21_version": coordinator.subordinate_21_version,
+        "pact_type": coordinator.pact_type,
+        "pact_code": coordinator.pact_code,
         "lock_locked": lock.locked(),
         "is_on": coordinator.is_on,
         "brightness_pct": coordinator.brightness_pct,
@@ -105,6 +108,12 @@ async def async_get_config_entry_diagnostics(
         "white_brightness": coordinator.white_brightness,
         "video_full_screen": coordinator.video_full_screen,
         "white_balance": white_balance,
+        "white_balance_flag": coordinator.white_balance_flag,
+        "white_balance_defaults": {
+            "flag": coordinator.white_balance_default_flag,
+            "red": coordinator.white_balance_default_red,
+            "blue": coordinator.white_balance_default_blue,
+        },
         "white_balance_position": (
             WHITE_BALANCE_POSITIONS.index(white_balance) + 1
             if white_balance is not None and white_balance in WHITE_BALANCE_POSITIONS
@@ -120,6 +129,10 @@ async def async_get_config_entry_diagnostics(
         "black_border": coordinator.black_border,
         "installation_direction": coordinator.installation_direction,
         "camera_health": coordinator.camera_health,
+        "strip_direction": coordinator.strip_direction,
+        "camera_position": coordinator.camera_position,
+        "gradient": coordinator.gradient,
+        "camera_status": coordinator.camera_status,
         "dreamview_last_write": coordinator._dreamview_last_write,
         "blank_screen_policy": {
             "detection": coordinator.blank_screen_detection,

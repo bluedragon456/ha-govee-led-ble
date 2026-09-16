@@ -366,7 +366,11 @@ def _coordinator(*, readable: bool = True):
 
 
 def _profile_coordinator(model: str):
+    from tests.test_h6199_capabilities import QUALIFIED
+
     coordinator = _coordinator()
+    if model == "H6199":
+        vars(coordinator).update(QUALIFIED)
     coordinator.active_mode = None
     coordinator._field_revisions = {}
 
@@ -397,6 +401,10 @@ def _profile_coordinator(model: str):
     coordinator.video_sound_effects_softness = 50
     coordinator.white_balance_red = 16
     coordinator.white_balance_blue = 3
+    coordinator.white_balance_flag = 1
+    coordinator.white_balance_default_flag = 1
+    coordinator.white_balance_default_red = 16
+    coordinator.white_balance_default_blue = 3
     coordinator.relative_brightness = 75
     coordinator.relative_brightness_left = 75
     coordinator.relative_brightness_top = 75

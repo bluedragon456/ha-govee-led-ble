@@ -8,6 +8,7 @@ from custom_components.ha_govee_led_ble.const import CONF_MODEL, DOMAIN
 from custom_components.ha_govee_led_ble.coordinator import (
     PACKET_LOG_LIMIT,
     PACKET_LOG_RAW_BYTES_LIMIT,
+    GoveeBLECoordinator,
 )
 from custom_components.ha_govee_led_ble.diagnostics import async_get_config_entry_diagnostics
 from custom_components.ha_govee_led_ble.effect_diagnostics import (
@@ -27,6 +28,9 @@ def _prep(coord, *, packet_log=None, segment_colors=None):
     coord._lock = MagicMock()
     coord._lock.locked.return_value = False
     coord._expected_state = {}
+    coord.pact_type = coord.pact_code = None
+    coord.strip_direction = coord.camera_position = coord.gradient = None
+    coord.camera_status = "unknown"
     return coord
 
 
@@ -294,16 +298,16 @@ async def test_surfaces_only_bounded_deployment_diagnostics_for_this_entry(
     assert "never-visible" not in str(diag)
 
 
-async def test_unknown_white_balance_is_not_reported_as_neutral(mock_h6199_coordinator):
-    coord = _prep(mock_h6199_coordinator)
+async def test_unknown_white_balance_is_not_reported_as_neutral(hass):
+    coord = GoveeBLECoordinator(hass, "11:22:33:44:55:66", "H6199", configuration_url=None)
     coord.white_balance_red = coord.white_balance_blue = None
     diag = await _run(coord)
     assert diag["coordinator"]["white_balance"] is None
     assert diag["coordinator"]["white_balance_position"] is None
 
 
-async def test_white_balance_position_is_exact_not_nearest(mock_h6199_coordinator):
-    coord = _prep(mock_h6199_coordinator)
+async def test_white_balance_position_is_exact_not_nearest(hass):
+    coord = GoveeBLECoordinator(hass, "11:22:33:44:55:66", "H6199", configuration_url=None)
     coord.white_balance_red, coord.white_balance_blue = 16, 3
     diag = await _run(coord)
     assert diag["coordinator"]["white_balance_position"] == 17
@@ -311,3 +315,29 @@ async def test_white_balance_position_is_exact_not_nearest(mock_h6199_coordinato
     coord.white_balance_red, coord.white_balance_blue = 17, 4
     diag = await _run(coord)
     assert diag["coordinator"]["white_balance_position"] is None
+
+
+@pytest.mark.parametrize(
+    "hardware,native,video",
+    [
+        ("3.02.01", "supported", "supported"),
+        (None, "evidence_gap", "evidence_gap"),
+        ("1.00.01", "evidence_gap", "unsupported"),
+    ],
+)
+async def test_native_registers_pact_and_effective_qualification(hass, hardware, native, video):
+    coord = GoveeBLECoordinator(hass, "11:22:33:44:55:66", "H6199", configuration_url=None)
+    coord.fw_version, coord.hw_version = "1.10.04", hardware
+    coord.subordinate_20_version, coord.subordinate_21_version = "1.03.00", "1.00.33"
+    coord.pact_type, coord.pact_code = 2, 1
+    coord.strip_direction, coord.camera_position, coord.gradient = 0, 1, 1
+    coord.camera_status = "incompatible"
+    data = (await _run(coord, hass=hass))["coordinator"]
+    assert (data["pact_type"], data["pact_code"]) == (2, 1)
+    assert (data["strip_direction"], data["camera_position"], data["gradient"]) == (0, 1, 1)
+    assert data["camera_status"] == "incompatible"
+    assert data["h6199_camera_controls_state"] == native
+    assert data["video_control_states"]["white_balance"] == video
+    assert data["supports_white_balance"] is True
+    assert data["white_balance"] is None
+    assert data["address"] == REDACTED

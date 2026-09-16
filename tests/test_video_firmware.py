@@ -39,6 +39,12 @@ from tests.storage_test_double import InMemoryVersionedDocumentStore
 from tests.test_video_semantics import alternate, reply
 
 
+@pytest.fixture(autouse=True)
+def synthetic_firmware_policy(monkeypatch):
+    """These tests isolate synthetic conditions; exact H6199 gates have their own suite."""
+    monkeypatch.setitem(MODEL_PROFILES, "H6199", replace(MODEL_PROFILES["H6199"], video_revision_policy=None))
+
+
 def gated(monkeypatch: pytest.MonkeyPatch):
     base = alternate(monkeypatch)
     profile = replace(

@@ -47,6 +47,10 @@ H6199CommandAck = cast(
     Any,
     import_module("custom_components.ha_govee_led_ble.generated_protocol.h6199_command_ack").H6199CommandAck,
 )
+H6199ControlPayload = cast(
+    Any,
+    import_module("custom_components.ha_govee_led_ble.generated_protocol.h6199_control_payload").H6199ControlPayload,
+)
 H6199EffectUpload = cast(
     Any,
     import_module("custom_components.ha_govee_led_ble.generated_protocol.h6199_effect_upload").H6199EffectUpload,
@@ -380,6 +384,41 @@ def build_physical_ic_count_query(model: str) -> bytes:
 
 
 INSTALLATION_DIRECTIONS = (2, 3, 4, 5)
+
+H6199_NATIVE_CONTROLS = ("strip_direction", "camera_position", "gradient", "camera_status")
+
+
+def build_h6199_control_query(control: str) -> bytes:
+    """Encode a named register query; callers must check runtime applicability."""
+    if control not in H6199_NATIVE_CONTROLS:
+        raise ValueError("Unknown H6199 control")
+    return _build_status_query(control, "H6199")
+
+
+def build_h6199_control(control: str, value: int) -> bytes:
+    """Encode an independently writable register, without changing the active mode."""
+    if control not in H6199_NATIVE_CONTROLS[:-1] or type(value) is not int or value not in (0, 1):
+        raise ValueError("H6199 control requires a writable setting and integer 0 or 1")
+    root = H6199CommandWrite()
+    root.header = b"\x33"
+    root.opcode = getattr(H6199CommandWrite.CommandOp, control)
+    root.body = _child(H6199ControlPayload.WriteValue, root)
+    root.body.value = value
+    return _serialize_xor(root)
+
+
+def parse_h6199_control(generated: Any) -> dict[str, int | str | None]:
+    """Read named generated fields, retaining unknown state rather than coercing it."""
+    control = getattr(generated.domain, "name", None)
+    if control in H6199_NATIVE_CONTROLS:
+        value = generated.body.value
+        if control == "camera_status":
+            return {control: getattr(value, "name", "unknown")}
+        return {control: int(value) if value in (0, 1) else None}
+    if control == "colour_mode" and getattr(generated.body.mode, "name", None) == "static_colour":
+        value = generated.body.detail.gradient
+        return {"gradient": int(value) if value in (0, 1) else None}
+    return {}
 
 
 def build_installation_direction(value: int, model: str) -> bytes:
@@ -1027,7 +1066,7 @@ def build_h6199_video(
     return build_video_mode("game" if game_mode else "movie", full_screen, saturation, sound_effects, softness, "H6199")
 
 
-def build_white_balance(red: int, blue: int | None, model: str) -> bytes:
+def build_white_balance(red: int, blue: int | None, model: str, *, flag: int = 1) -> bytes:
     profile = get_profile(model)
     if not profile.supports_white_balance:
         raise ValueError(f"{model} does not support white balance")
@@ -1046,14 +1085,16 @@ def build_white_balance(red: int, blue: int | None, model: str) -> bytes:
         payload = _child(root_type.ScalarWhiteBalancePayload, body)
         payload.value = red
     else:
-        if blue is None:
-            raise ValueError("position white balance requires red and blue")
+        if type(flag) is not int or flag not in (0, 1):
+            raise ValueError("position white balance requires a known auto/manual flag")
+        if any(type(value) is not int or not 0 <= value <= 255 for value in (red, blue)):
+            raise ValueError("position white balance requires red and blue bytes")
         body.setting = root_type.DisplaySetting.white_balance
         body.len = 3
         payload = _child(root_type.WhiteBalancePayload, body)
-        payload.manual = 1
-        payload.red = max(0, min(255, red))
-        payload.blue = max(0, min(255, blue))
+        payload.manual = flag
+        payload.red = red
+        payload.blue = blue
     body.payload = payload
     root.body = body
     return _serialize_xor(root)

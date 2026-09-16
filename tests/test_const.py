@@ -197,7 +197,7 @@ def test_model_specific_music_capabilities():
     assert MODEL_PROFILES["H617A"].supports_music_color
     assert MODEL_PROFILES["H6199"].supports_music_color
     assert (MODEL_PROFILES["H617A"].music_sensitivity_min, MODEL_PROFILES["H617A"].music_sensitivity_max) == (0, 99)
-    assert (MODEL_PROFILES["H6199"].music_sensitivity_min, MODEL_PROFILES["H6199"].music_sensitivity_max) == (1, 100)
+    assert (MODEL_PROFILES["H6199"].music_sensitivity_min, MODEL_PROFILES["H6199"].music_sensitivity_max) == (0, 100)
     assert not MODEL_PROFILES["H6199"].supports_white_brightness
     assert not MODEL_PROFILES["H6199"].static_readback_echoes_color
     assert MODEL_PROFILES["H6199"].supports_video_sound_effects

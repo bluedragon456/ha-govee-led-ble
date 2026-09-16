@@ -1,4 +1,4 @@
-"""Non-identifying Govee advertisement encryption evidence."""
+"""Non-identifying Govee advertisement Pact and encryption evidence."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass

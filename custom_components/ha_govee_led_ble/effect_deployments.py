@@ -114,6 +114,11 @@ class PriorControlState:
     video_sound_effects_softness: int = 100
     white_balance_red: int | None = None
     white_balance_blue: int | None = None
+    # Absent in legacy snapshots: the original auto/manual mode cannot be reconstructed.
+    white_balance_flag: int | None = None
+    white_balance_default_flag: int | None = None
+    white_balance_default_red: int | None = None
+    white_balance_default_blue: int | None = None
     white_balance_scalar: int | None = None
     relative_brightness: int | None = None
     relative_brightness_left: int | None = None
@@ -257,6 +262,10 @@ class PriorControlState:
         optional_numeric_values: tuple[tuple[int | None, str, int, int], ...] = (
             (self.white_balance_red, "prior white-balance red", 0, 255),
             (self.white_balance_blue, "prior white-balance blue", 0, 255),
+            (self.white_balance_flag, "prior white-balance flag", 0, 255),
+            (self.white_balance_default_flag, "prior white-balance default flag", 0, 255),
+            (self.white_balance_default_red, "prior white-balance default red", 0, 255),
+            (self.white_balance_default_blue, "prior white-balance default blue", 0, 255),
             (self.white_balance_scalar, "prior scalar white balance", 0, 255),
             (self.relative_brightness_strip_left, "prior strip-left brightness", 1, 100),
             (self.relative_brightness_strip_right, "prior strip-right brightness", 1, 100),
@@ -328,6 +337,10 @@ class PriorControlState:
             "video_sound_effects_softness": self.video_sound_effects_softness,
             "white_balance_red": self.white_balance_red,
             "white_balance_blue": self.white_balance_blue,
+            "white_balance_flag": self.white_balance_flag,
+            "white_balance_default_flag": self.white_balance_default_flag,
+            "white_balance_default_red": self.white_balance_default_red,
+            "white_balance_default_blue": self.white_balance_default_blue,
             **({"white_balance_scalar": self.white_balance_scalar} if self.white_balance_scalar is not None else {}),
             **(
                 {
@@ -423,6 +436,10 @@ class PriorControlState:
             video_sound_effects_softness=_optional_int(raw, "video_sound_effects_softness", default=100),
             white_balance_red=_optional_int(raw, "white_balance_red"),
             white_balance_blue=_optional_int(raw, "white_balance_blue"),
+            white_balance_flag=_optional_int(raw, "white_balance_flag"),
+            white_balance_default_flag=_optional_int(raw, "white_balance_default_flag"),
+            white_balance_default_red=_optional_int(raw, "white_balance_default_red"),
+            white_balance_default_blue=_optional_int(raw, "white_balance_default_blue"),
             white_balance_scalar=_optional_int(raw, "white_balance_scalar"),
             relative_brightness_strip_left=_optional_int(raw, "relative_brightness_strip_left"),
             relative_brightness_strip_right=_optional_int(raw, "relative_brightness_strip_right"),

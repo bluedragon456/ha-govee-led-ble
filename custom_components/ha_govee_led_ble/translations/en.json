@@ -1,4 +1,14 @@
 {
+  "entity": {
+    "select": {
+      "strip_direction": {"name": "Strip direction", "state": {"clockwise": "Clockwise", "anticlockwise": "Anticlockwise"}},
+      "camera_position": {"name": "Camera position", "state": {"top": "Top", "bottom": "Bottom"}},
+      "gradient": {"name": "Gradient", "state": {"off": "Off", "on": "On"}}
+    },
+    "sensor": {
+      "camera_status": {"name": "Camera status", "state": {"absent": "Absent", "healthy": "Connected", "incompatible": "Incompatible", "unknown": "Unknown"}}
+    }
+  },
   "config": {
     "step": {
       "bluetooth": {

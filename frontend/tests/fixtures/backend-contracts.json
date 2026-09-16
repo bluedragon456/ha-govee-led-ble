@@ -3460,7 +3460,7 @@
             "brightness_min": 0,
             "multi_max": 4,
             "music_sensitivity_max": 100,
-            "music_sensitivity_min": 1,
+            "music_sensitivity_min": 0,
             "palette_max": 8,
             "palette_min": 1,
             "speed_max": 100,
@@ -3477,7 +3477,7 @@
               "available": true,
               "calm_default": false,
               "colour": false,
-              "evidence": null,
+              "evidence": "H6199 Energetic selector; no fixed colour",
               "palette_size": 0,
               "parameters": {},
               "style": false
@@ -3494,8 +3494,8 @@
             "rolling": {
               "available": true,
               "calm_default": false,
-              "colour": false,
-              "evidence": null,
+              "colour": true,
+              "evidence": "H6199 owner-qualified Rolling fixed-colour readback",
               "palette_size": 0,
               "parameters": {},
               "style": false
@@ -3503,8 +3503,8 @@
             "spectrum": {
               "available": true,
               "calm_default": false,
-              "colour": false,
-              "evidence": null,
+              "colour": true,
+              "evidence": "H6199 owner-qualified Spectrum fixed-colour readback",
               "palette_size": 0,
               "parameters": {},
               "style": false

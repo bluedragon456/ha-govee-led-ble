@@ -112,6 +112,8 @@ class ModelProfile:
     video_grammar: str | None = None
     dreamview_max_sub_devices: int = 0
     video_firmware_conditions: tuple[VideoFirmwareCondition, ...] = ()
+    # Exact-product revision policy, independent of compatible wire grammars.
+    video_revision_policy: str | None = None
     read_domains: frozenset[ReadDomain] = frozenset()
     setup_required_read_domains: frozenset[ReadDomain] = frozenset()
     supports_rgb: bool = False
@@ -166,6 +168,8 @@ class ModelProfile:
             type(self.physical_ic_count) is not int or self.physical_ic_count <= 0
         ):
             raise ValueError("physical IC count must be a positive integer or unknown")
+        if self.video_revision_policy not in (None, "H6199"):
+            raise ValueError("unknown video revision policy")
         if type(self.video_saturation_min) is not int or not 0 <= self.video_saturation_min <= 100:
             raise ValueError("video saturation minimum must be from 0 to 100")
         if not self.setup_required_read_domains <= self.read_domains:
@@ -468,6 +472,7 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         status_grammar="H6199",
         effect_grammar="H6199",
         video_grammar="H6199",
+        video_revision_policy="H6199",
         read_domains=frozenset(
             {
                 ReadDomain.POWER,
@@ -487,8 +492,6 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
                 ReadDomain.POWER,
                 ReadDomain.BRIGHTNESS,
                 ReadDomain.COLOUR_MODE,
-                ReadDomain.DISPLAY_SETTING,
-                ReadDomain.RELATIVE_BRIGHTNESS,
             }
         ),
         supports_rgb=True,
@@ -507,8 +510,13 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
         supports_relative_brightness=True,
         supports_blank_screen=True,
         music_modes=_H6199_MUSIC_MODES,
-        music_variants=(MusicVariant(0x03, "H6199 captured Rhythm selector style", supports_style=True),),
-        music_sensitivity_min=1,
+        music_variants=(
+            MusicVariant(0x05, "H6199 Energetic selector; no fixed colour", supports_fixed_colour=False),
+            MusicVariant(0x03, "H6199 captured Rhythm selector style", supports_style=True),
+            MusicVariant(0x04, "H6199 owner-qualified Spectrum fixed-colour readback"),
+            MusicVariant(0x06, "H6199 owner-qualified Rolling fixed-colour readback"),
+        ),
+        music_sensitivity_min=0,
         music_sensitivity_max=100,
         supports_music_color=True,
         supports_advanced_effects=True,

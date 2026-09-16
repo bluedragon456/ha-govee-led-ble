@@ -1468,7 +1468,10 @@ async def test_invalid_music_selection_has_no_control_side_effects(light, mock_c
 
 @pytest.mark.parametrize("effect,mode", [("Video: Movie", "movie"), ("Video: Game", "game"), ("video: game", "game")])
 async def test_turn_on_video_effect_is_first_class(h6199_light, mock_h6199_coordinator, effect, mode):
+    from tests.test_h6199_capabilities import QUALIFIED
+
     co = mock_h6199_coordinator
+    vars(co).update(QUALIFIED)
     co.is_on = True
     co.video_full_screen = False
     co.video_saturation = 63
@@ -1493,6 +1496,9 @@ async def test_turn_on_video_effect_is_first_class(h6199_light, mock_h6199_coord
 
 
 async def test_turn_on_video_effect_uses_the_device_template_default(mock_h6199_coordinator):
+    from tests.test_h6199_capabilities import QUALIFIED
+
+    vars(mock_h6199_coordinator).update(QUALIFIED)
     content = VideoProfile(
         "H6199",
         "movie",
