@@ -67,9 +67,10 @@ from .native_profile_controls import (
     apply_blank_screen,
     apply_relative_brightness,
     apply_white_balance,
+    async_require_video_controls,
 )
 from .scenes import canonical_scene_key, resolve_scene_identity, scene_code_is_ambiguous
-from .video_applicability import requested_video_controls, require_video_controls, validate_video_request
+from .video_applicability import requested_video_controls, require_video_controls
 
 ACTIVATION_ATTEMPTS = 2
 VERIFICATION_ATTEMPTS = 2
@@ -116,7 +117,7 @@ async def async_apply_compiled_profile(
         return
 
     profile = coordinator.profile
-    require_video_controls(profile, coordinator, requested_video_controls(compiled))
+    await async_require_video_controls(coordinator, requested_video_controls(compiled))
     underlying_writer = writer
     requested_controls = requested_video_controls(compiled)
 
@@ -156,7 +157,7 @@ async def async_apply_compiled_profile(
             coordinator._field_revisions.get(field, 0) <= baseline for field, baseline in baselines.items()
         ):
             raise ValueError("Cannot preserve omitted video settings without fresh readback")
-        require_video_controls(profile, coordinator, requested_video_controls(compiled))
+        await async_require_video_controls(coordinator, requested_video_controls(compiled))
     if compiled.blank_screen is not None and compiled.blank_screen_policy is None:
         baselines = {
             field: coordinator._field_revisions.get(field, 0)
@@ -294,7 +295,10 @@ class EffectDeploymentEngine:
     ) -> tuple[CompiledApplication, DeploymentRecord]:
         resolved_diy_code = resolve_diy_code(item, diy_code, model=coordinator.model)
         compiled = compile_application(item, coordinator.model, diy_code=resolved_diy_code, profile=coordinator.profile)
-        validate_video_request(coordinator, item.content)
+        if isinstance(compiled, CompiledVideoProfile):
+            await async_require_video_controls(
+                coordinator, requested_video_controls(compiled), intent=ControlIntent.APPLY
+            )
         record = self._new_record(
             compiled,
             config_entry_id=config_entry_id,
@@ -518,6 +522,8 @@ class EffectDeploymentEngine:
                                 )
                             ),
                         )
+                    else:
+                        prior_state = replace(prior_state, video_restore_controls=())
                     next_record = replace(current, prior_state=prior_state)
                     await self._deployments.async_put(next_record, expected_version=None)
                     current = next_record

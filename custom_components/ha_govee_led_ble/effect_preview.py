@@ -68,9 +68,10 @@ from .effect_scenes import (
 )
 from .effect_template_defaults import CatalogueTemplateDefault, CatalogueTemplateDefaultRepository
 from .generated_protocol_adapter import build_power
+from .native_profile_controls import async_require_video_controls
 from .native_scenes import build_native_scene_packets, encode_authored_scene_body, resolve_native_scene_body
 from .scenes import canonical_scene_key, scene_code_is_ambiguous
-from .video_applicability import validate_video_request
+from .video_applicability import requested_video_controls, validate_video_request
 
 PREVIEW_VERIFY_DELAY = 0.75
 PREVIEW_VERIFY_TIMEOUT = 4.0
@@ -490,7 +491,10 @@ class EffectPreviewManager:
             compiled = compile_application(item, coordinator.model, diy_code=diy_code, profile=coordinator.profile)
         except ValueError as exc:
             raise PreviewError(str(exc)) from exc
-        validate_video_request(coordinator, item.content)
+        if isinstance(compiled, CompiledVideoProfile):
+            await async_require_video_controls(
+                coordinator, requested_video_controls(compiled), intent=ControlIntent.PREVIEW
+            )
         if (
             persist_default
             and item.origin.kind is SourceKind.CATALOGUE_TEMPLATE
@@ -889,8 +893,10 @@ class EffectPreviewManager:
         try:
             coordinator = self._loaded_coordinator(request.config_entry_id)
             compiled = request.compiled
-            if request.item is not None:
-                validate_video_request(coordinator, request.item.content)
+            if isinstance(compiled, CompiledVideoProfile):
+                await async_require_video_controls(
+                    coordinator, requested_video_controls(compiled), intent=ControlIntent.PREVIEW
+                )
         except Exception as exc:
             self._diagnostics.record(
                 DiagnosticStage.COMPILATION,

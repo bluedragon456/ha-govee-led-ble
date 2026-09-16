@@ -356,3 +356,42 @@ async def test_basic_setup_with_missing_identity_uses_real_lifecycle(lifecycle):
     assert c.is_on and c.available and c.camera_status == "unknown"
     assert c._client is None and clients[-1].disconnect.await_count == 1
     assert h6199_camera_controls_state(c.model, c) is CapabilityState.EVIDENCE_GAP
+
+
+@pytest.mark.parametrize("missing_domain", [None, "power", "brightness", "colour_mode"])
+async def test_issue_293_setup_requires_only_basic_readback(lifecycle, missing_domain):
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    from tests.test_h6199_native_controls import frame
+
+    c, replies, clients, packets = lifecycle
+    # Reported main versions; Wi-Fi identity and Pact were not supplied.
+    c.pact_type = c.pact_code = None
+    replies[build_hardware_query("H6199")] = frame("aa0703" + b"1.00.01".hex())
+    replies[build_firmware_query("H6199")] = frame("aa06" + b"1.07.02".hex())
+    basic = {
+        "power": build_power_query("H6199"),
+        "brightness": build_brightness_query("H6199"),
+        "colour_mode": build_colour_mode_query("H6199"),
+    }
+    allowed = {build_hardware_query("H6199"), build_firmware_query("H6199"), *basic.values()}
+    for query in list(replies):
+        if query not in allowed or query == basic.get(missing_domain):
+            del replies[query]
+
+    if missing_domain is None:
+        await c._async_update_data()
+        assert c.available and c.is_on and c.brightness_pct == 50
+    else:
+        with pytest.raises(UpdateFailed, match="unreachable at setup"):
+            await c._async_update_data()
+
+    assert c.hw_version == "1.00.01" and c.fw_version == "1.07.02"
+    assert c.subordinate_20_version is c.subordinate_21_version is None
+    states = video_control_states(c.profile, c)
+    assert all(
+        states[control] is CapabilityState.UNSUPPORTED
+        for control in ("white_balance", "relative_brightness", "blank_screen")
+    )
+    assert not any(packet[0] == 0x33 or packet[1] in (0xA9, 0xAE, 0x30, 0x31, 0x32, 0xA3) for packet in packets)
+    assert c._client is None and clients[-1].disconnect.await_count == 1

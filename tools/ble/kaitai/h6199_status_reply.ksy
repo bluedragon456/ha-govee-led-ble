@@ -99,6 +99,8 @@ types:
     seq:
       - id: value
         type: u1
+      - id: unknown_tail
+        size-eos: true
   white_balance_state:
     seq:
       - id: reset_flag
@@ -113,6 +115,8 @@ types:
         type: u1
       - id: current_blue
         type: u1
+      - id: unknown_tail
+        size-eos: true
   blank_screen_state:
     doc: |
       Blank-screen detection policy. The app parser reads the same two modes and second-based
@@ -127,6 +131,8 @@ types:
         type: u2
       - id: same_tone_duration_seconds
         type: u2
+      - id: unknown_tail
+        size-eos: true
   relative_brightness_body:
     doc: |
       The shared app parser always reads six value slots. H6199 reports edge_count 4; the final
@@ -192,6 +198,8 @@ types:
         type: u1
       - id: softness
         type: u1
+      - id: unknown_tail
+        size-eos: true
   scene_state:
     seq:
       - id: scene_id

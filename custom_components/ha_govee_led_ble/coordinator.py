@@ -26,6 +26,7 @@ from .const import (
     ReadDomain,
     default_effect_categories,
     default_effect_families,
+    device_profile,
     get_profile,
 )
 from .control_arbiter import BLEControlArbiter, ControlIntent, PreviewAdmission, async_control_intent
@@ -59,6 +60,7 @@ from .generated_protocol_adapter import (
     parse_command_result,
     parse_h6199_control,
     parse_physical_ic_count,
+    require_profile_packet,
 )
 from .govee_encryption import GoveeCryptoError
 from .govee_encryption.session import GoveeEncryptionSession
@@ -166,6 +168,7 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
             ),
         )
         self.address, self.model, self.profile = address, model, profile
+        self._profile_generation = 0
         self.configuration_url = configuration_url
         self.effect_families = default_effect_families(model) if effect_families is None else effect_families
         self.effect_categories = (
@@ -705,14 +708,44 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
     def _async_on_advertisement(
         self, _service_info: bluetooth.BluetoothServiceInfoBleak, _change: bluetooth.BluetoothChange
     ) -> None:
+        previous_pact = self.pact_type, self.pact_code
+        was_present = self._present
         self._note_advertisement(_service_info)
         self._set_present(True)
+        if was_present and previous_pact != (self.pact_type, self.pact_code):
+            self.async_update_listeners()
 
     def _note_advertisement(self, service_info: bluetooth.BluetoothServiceInfoBleak | None) -> None:
         if service_info is not None and isinstance(service_info.manufacturer_data, Mapping):
             advertisement = parse_govee_advertisement(service_info.manufacturer_data)
             if advertisement is not None:
                 self.pact_type, self.pact_code = advertisement.pact_type, advertisement.pact_code
+                if self.model == "H6199":
+                    profile = device_profile(self.model, self.pact_type, self.pact_code)
+                    if profile != self.profile:
+                        self.profile = profile
+                        self._profile_generation += 1
+                        self._expected_state.clear()
+                        self.brightness_pct = 100
+                        self.color_mode = None
+                        self.effect = self.diy_code = self._scene_code = None
+                        self.music_mode = self.video_mode = "off"
+                        self.music_sensitivity = 99
+                        self.music_color = self._music_palette = None
+                        self.music_calm = False
+                        self.video_saturation = self.video_sound_effects_softness = 100
+                        self.video_full_screen, self.video_sound_effects = True, False
+                        self.rgb_color_source = self.color_temp_kelvin_source = "initial"
+                        self.color_temp_kelvin = None
+                        self.segment_colors = [(255, 255, 255)] * profile.segment_count
+                        self.segment_brightness = [100] * profile.segment_count
+                        self.segment_state_source = "initial"
+                        self.segment_state_observed_at = None
+                        self._segment_groups_observed.clear()
+                        self._segment_query_colors = self._segment_query_brightness = None
+                        for field in vars(self):
+                            if field.startswith(("white_balance_", "relative_brightness", "blank_screen")):
+                                setattr(self, field, None)
             if advertisement is not None and advertisement.supports_encryption:
                 self._advertised_encryption = True
                 if self._encryption is not None and self._encryption.version == 0:
@@ -762,10 +795,16 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                     if not acquired:
                         return self._state_snapshot()
                     previous_client = self._client
-                    refreshed = await self.refresh_state(
-                        refresh_all=True,
-                        required_domains=self.profile.setup_required_read_domains,
-                    )
+                    for _ in range(2):
+                        generation = self._profile_generation
+                        refreshed = await self.refresh_state(
+                            refresh_all=True,
+                            required_domains=self.profile.setup_required_read_domains,
+                        )
+                        if generation == self._profile_generation:
+                            break
+                    else:
+                        refreshed = False
                     client = self._client
                     if not refreshed or client is None:
                         if client is not None:
@@ -1184,6 +1223,11 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                         setattr(self, attr, value)
                         observed.append(attr)
         if parsed.mode is ParsedMode.COLOUR:
+            if self.model == "H6199" and self.profile.status_grammar == "H6199":
+                values = parse_h6199_control(generated)
+                for field, value in values.items():
+                    setattr(self, field, value)
+                observed.extend(values)
             static_values: dict[str, Any] = {}
             if parsed.rgb_color is not None and self.profile.static_readback_echoes_color:
                 static_values["rgb_color"] = parsed.rgb_color
@@ -1265,6 +1309,16 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
             )
             return
         domain, payload = decoded.domain, decoded.payload
+        if self.profile.command_operations is not None and not self.profile.can_read(domain):
+            self._record_packet(
+                "rx",
+                frame,
+                outcome="rejected",
+                reason="unsupported_domain",
+                parser=result.parser,
+                domain=decoded.raw_domain,
+            )
+            return
         generated = decoded.generated
         packet_entry = self._record_packet(
             "rx",
@@ -1282,23 +1336,33 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
         )
         try:
             observed: tuple[str, ...] = ()
-            if self.model == "H6199" and self.profile.status_grammar == "H6199":
+            if (
+                self.model == "H6199"
+                and self.profile.status_grammar == "H6199"
+                and domain is not StatusDomain.COLOUR_MODE
+            ):
                 values = parse_h6199_control(generated)
+                if "gradient" in values:
+                    # AA05 is a display observation, not confirmation of an A3 register write.
+                    values["gradient_register"] = values["gradient"]
                 for field, value in values.items():
                     setattr(self, field, value)
-                if values:
-                    self._mark_received(domain, *values)
+                observed = tuple(values)
             if domain is StatusDomain.POWER:
                 value = bool(generated.body.is_on)
                 if self._accept_expected("is_on", value):
                     self.is_on = value
                     observed = ("is_on",)
             elif domain is StatusDomain.BRIGHTNESS:
+                if not self.profile.can_read(ReadDomain.BRIGHTNESS):
+                    return
                 brightness_value = (
                     int(generated.body.percent)
                     if self.profile.status_grammar in {"H6099", "H6199"}
                     else int(generated.body.brightness_pct)
                 )
+                if not 0 <= brightness_value <= 100:
+                    raise ValueError("brightness outside percentage range")
                 if self._accept_expected("brightness_pct", brightness_value):
                     self.brightness_pct = brightness_value
                     observed = ("brightness_pct",)
@@ -1427,6 +1491,7 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
         expected_values: Mapping[str, Any] | None = None,
     ) -> None:
         """Write on the caller's connection without changing its transaction policy."""
+        require_profile_packet(packet, self.profile)
         wire_packet = packet
         if (transform := self.profile.outbound_transform) is not None:
             wire_packet = transform(packet)
@@ -1438,6 +1503,7 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
             wire_packet = self._encryption.encode(wire_packet)
         if before_write is not None:
             before_write()
+        require_profile_packet(packet, self.profile)
         if state_values is not None:
             for field, value in state_values.items():
                 setattr(self, field, value)
@@ -1447,6 +1513,7 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
             self._arm_expected_values(dict(expected_values))
         if arm_expected:
             self.control_write_attempts += 1
+        generation = self._profile_generation
         try:
             await client.write_gatt_char(WRITE_UUID, wire_packet, response=False)
         except asyncio.CancelledError:
@@ -1461,6 +1528,8 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                 raise GoveeCryptoError("encrypted_write_failed") from None
             raise
         self._record_packet("tx", wire_packet, outcome="sent", reason="write_succeeded")
+        if arm_expected and generation != self._profile_generation:
+            raise ValueError("Device profile changed during control write; refresh and retry")
 
     async def _send_state_queries(
         self,
@@ -1473,44 +1542,79 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
         query_black_border: bool | None = None,
         query_relative_brightness: bool | None = None,
         query_segments: bool | None = None,
+        required_domains: frozenset[ReadDomain] | None = None,
+        optional_baselines: dict[str, int] | None = None,
     ) -> bool:
         client = self._client
         if client is None or not client.is_connected:
             return False
+        generation = self._profile_generation
         try:
-            queries: list[bytes] = []
+            queries: list[tuple[bytes, ReadDomain, tuple[str, ...]]] = []
             states = video_control_states(self.profile, self)
             if query_power and self.profile.can_read(ReadDomain.POWER):
-                queries.append(build_power_query(self.model))
+                queries.append((build_power_query(self.model), ReadDomain.POWER, ("is_on",)))
             if query_brightness and self.profile.can_read(ReadDomain.BRIGHTNESS):
-                queries.append(build_brightness_query(self.model))
+                queries.append((build_brightness_query(self.model), ReadDomain.BRIGHTNESS, ("brightness_pct",)))
             if query_color_mode and self.profile.supports_color_mode_readback:
-                queries.append(build_colour_mode_query(self.model))
+                queries.append((build_colour_mode_query(self.model), ReadDomain.COLOUR_MODE, ("color_mode",)))
             full_query = query_power and query_brightness and query_color_mode
             if (
                 self.profile.can_read(ReadDomain.DISPLAY_SETTING)
                 and states["white_balance"] is CapabilityState.SUPPORTED
                 and (query_white_balance if query_white_balance is not None else full_query)
             ):
-                queries.append(build_white_balance_query(self.model))
+                queries.append(
+                    (
+                        build_white_balance_query(self.model),
+                        ReadDomain.DISPLAY_SETTING,
+                        ("white_balance_scalar",)
+                        if self.profile.video_white_balance_representation == "scalar"
+                        else (
+                            "white_balance_flag",
+                            "white_balance_red",
+                            "white_balance_blue",
+                            "white_balance_default_flag",
+                            "white_balance_default_red",
+                            "white_balance_default_blue",
+                        ),
+                    )
+                )
             if (
                 self.profile.can_read(ReadDomain.DISPLAY_SETTING)
                 and states["blank_screen"] is CapabilityState.SUPPORTED
                 and (query_blank_screen if query_blank_screen is not None else full_query)
             ):
-                queries.append(build_blank_screen_query(self.model))
+                queries.append(
+                    (
+                        build_blank_screen_query(self.model),
+                        ReadDomain.DISPLAY_SETTING,
+                        (
+                            "blank_screen",
+                            "blank_screen_detection",
+                            "blank_screen_low_brightness_duration_seconds",
+                            "blank_screen_same_tone_duration_seconds",
+                        ),
+                    )
+                )
             if (
                 self.profile.can_read(ReadDomain.DISPLAY_SETTING)
                 and states["black_border"] is CapabilityState.SUPPORTED
                 and (query_black_border if query_black_border is not None else full_query)
             ):
-                queries.append(build_black_border_query(self.model))
+                queries.append((build_black_border_query(self.model), ReadDomain.DISPLAY_SETTING, ("black_border",)))
             if (
                 self.profile.can_read(ReadDomain.RELATIVE_BRIGHTNESS)
                 and states["relative_brightness"] is CapabilityState.SUPPORTED
                 and (query_relative_brightness if query_relative_brightness is not None else full_query)
             ):
-                queries.append(build_relative_brightness_query(self.model))
+                queries.append(
+                    (
+                        build_relative_brightness_query(self.model),
+                        ReadDomain.RELATIVE_BRIGHTNESS,
+                        tuple(f"relative_brightness_{zone}" for zone in self.profile.video_brightness_zones),
+                    )
+                )
             if (
                 self.profile.can_read(ReadDomain.SEGMENTS)
                 and self.profile.supports_segments
@@ -1520,16 +1624,62 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                 self._segment_query_colors = list(self.segment_colors)
                 self._segment_query_brightness = list(self.segment_brightness)
                 queries.extend(
-                    build_segment_query(group, self.model) for group in range(1, self._segment_group_count + 1)
+                    (
+                        build_segment_query(group, self.model),
+                        ReadDomain.SEGMENTS,
+                        ("segment_colors", "segment_brightness"),
+                    )
+                    for group in range(1, self._segment_group_count + 1)
                 )
-            queries.extend(h6099_control_queries(self.model, self.profile))
-            if self.model == "H6199":
+            if full_query:
+                queries.extend(
+                    (query, domain, (domain.value,))
+                    for query, domain in zip(
+                        h6099_control_queries(self.model, self.profile),
+                        (
+                            domain
+                            for domain in (ReadDomain.INSTALLATION_DIRECTION, ReadDomain.CAMERA_HEALTH)
+                            if self.profile.can_read(domain)
+                        ),
+                        strict=True,
+                    )
+                )
+            if full_query and self.model == "H6199":
                 for control in H6199_NATIVE_CONTROLS:
                     setattr(self, control, "unknown" if control == "camera_status" else None)
                     if h6199_camera_controls_state(self.model, self) is CapabilityState.SUPPORTED:
-                        queries.append(build_h6199_control_query(control))
-            for query in queries:
-                await self._async_write_packet(client, query)
+                        queries.append((build_h6199_control_query(control), ReadDomain.OTHER, (control,)))
+            required = (
+                required_domains
+                if required_domains is not None
+                else frozenset(
+                    {
+                        ReadDomain.POWER,
+                        ReadDomain.BRIGHTNESS,
+                        ReadDomain.COLOUR_MODE,
+                        ReadDomain.DISPLAY_SETTING,
+                        ReadDomain.RELATIVE_BRIGHTNESS,
+                    }
+                )
+            )
+            if query_segments is True:
+                required |= {ReadDomain.SEGMENTS}
+            for query, domain, fields in queries:
+                if generation != self._profile_generation or self._client is not client or not client.is_connected:
+                    return False
+                baselines = {field: self._field_revisions.get(field, 0) for field in fields}
+                try:
+                    await self._async_write_packet(client, query)
+                except BleakError:
+                    if domain in required or self._client is not client or not client.is_connected:
+                        return False
+                    _LOGGER.debug("Optional %s query failed for %s", domain.value, self.address, exc_info=True)
+                    continue
+                if optional_baselines is not None:
+                    for field, revision in baselines.items():
+                        optional_baselines.setdefault(field, revision)
+            if generation != self._profile_generation or self._client is not client or not client.is_connected:
+                return False
             return True
         except BleakError:
             return False
@@ -1542,8 +1692,8 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
             if h6199_camera_controls_state(self.model, self) is not CapabilityState.SUPPORTED:
                 raise ValueError("H6199 control is not qualified for this device revision")
 
-        qualified()
         async with async_control_intent(self, ControlIntent.USER):
+            qualified()
             try:
                 async with asyncio.timeout(EFFECT_SEQUENCE_CONNECT_TIMEOUT + timeout):
                     await self.async_write_effect_sequence(
@@ -1559,7 +1709,8 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                 if client is None or not client.is_connected:
                     raise BleakError("Device disconnected before control readback")
                 qualified()
-                baseline = {control: self._field_revisions.get(control, 0)}
+                observation = "gradient_register" if control == "gradient" else control
+                baseline = {observation: self._field_revisions.get(observation, 0)}
                 setattr(self, control, None)
                 try:
                     async with asyncio.timeout(timeout):
@@ -1567,7 +1718,7 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                         fresh = await self._wait_for_revisions(baseline, {}, time.monotonic() + timeout)
                 finally:
                     self.async_set_updated_data(self.data or {})
-                if not fresh or getattr(self, control) != value:
+                if not fresh or getattr(self, observation, None) != value:
                     raise ValueError("Device did not confirm the requested H6199 control")
 
     async def _send_identity_queries(self) -> None:
@@ -1579,21 +1730,29 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
         client = self._client
         if client is None or not client.is_connected:
             return
-        candidates: list[tuple[bytes, str]] = []
-        if self.profile.can_read(ReadDomain.HARDWARE):
-            candidates.append((build_hardware_query(self.model), "hw_version"))
-        if self.profile.can_read(ReadDomain.FIRMWARE):
-            candidates.append((build_firmware_query(self.model), "fw_version"))
-        if self.profile.can_read(ReadDomain.SUBORDINATE_20):
-            candidates.append((build_subordinate_query(0x20, self.model), "subordinate_20_version"))
-        if self.profile.can_read(ReadDomain.SUBORDINATE_21):
-            candidates.append((build_subordinate_query(0x21, self.model), "subordinate_21_version"))
-        queries = [q for q, field in candidates if self._identity_field_incomplete(field)]
-        if self.profile.command_grammar == "H6099" and self.profile.physical_ic_count is None:
-            queries.append(build_physical_ic_count_query(self.model))
         try:
-            for query in queries:
-                await self._async_write_packet(client, query)
+            for _ in range(2):
+                generation = self._profile_generation
+                candidates: list[tuple[bytes, str]] = []
+                if self.profile.can_read(ReadDomain.HARDWARE):
+                    candidates.append((build_hardware_query(self.model), "hw_version"))
+                if self.profile.can_read(ReadDomain.FIRMWARE):
+                    candidates.append((build_firmware_query(self.model), "fw_version"))
+                if self.profile.can_read(ReadDomain.SUBORDINATE_20):
+                    candidates.append((build_subordinate_query(0x20, self.model), "subordinate_20_version"))
+                if self.profile.can_read(ReadDomain.SUBORDINATE_21):
+                    candidates.append((build_subordinate_query(0x21, self.model), "subordinate_21_version"))
+                queries = [q for q, field in candidates if self._identity_field_incomplete(field)]
+                if self.profile.command_grammar == "H6099" and self.profile.physical_ic_count is None:
+                    queries.append(build_physical_ic_count_query(self.model))
+                for query in queries:
+                    if generation != self._profile_generation:
+                        break
+                    if self._client is not client or not client.is_connected:
+                        return
+                    await self._async_write_packet(client, query)
+                if generation == self._profile_generation:
+                    return
         except BleakError:
             _LOGGER.debug("Identity query failed for %s", self.address)
 
@@ -1690,6 +1849,7 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
     ) -> bool:
         if not self.profile.state_readable:
             return False
+        generation = self._profile_generation
         if expected_rgb_color is not None and not self.profile.static_readback_echoes_color:
             return False
         if expected_color_temp_kelvin is not None and not self.profile.static_readback_kelvin:
@@ -1830,6 +1990,8 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
         async with async_control_intent(self, intent):
             async with self._lock:
                 client = await self._ensure_connected()
+            if generation != self._profile_generation:
+                return False
             states = video_control_states(self.profile, self)
             requested_registers = display_settings | {
                 control
@@ -1865,11 +2027,19 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
             initial_domain_baselines = {domain: self._domain_revisions.get(domain, 0) for domain in awaited_domains}
             deadline = time.monotonic() + timeout
             for attempt in range(2):
-                optional_baselines = (
-                    {field: self._field_revisions.get(field, 0) for field in H6199_NATIVE_CONTROLS}
-                    if refresh_all and h6199_camera_controls_state(self.model, self) is CapabilityState.SUPPORTED
-                    else {}
-                )
+                optional_baselines: dict[str, int] = {}
+                query_options: dict[str, Any] = {}
+                if refresh_all or required_domains is not None:
+                    query_options = {
+                        "required_domains": frozenset(awaited_domains)
+                        | (
+                            {ReadDomain.DISPLAY_SETTING}
+                            if requested_registers & {"white_balance", "blank_screen", "black_border"}
+                            else set()
+                        )
+                        | ({ReadDomain.RELATIVE_BRIGHTNESS} if "relative_brightness" in requested_registers else set()),
+                        "optional_baselines": optional_baselines,
+                    }
                 field_baselines = {field: self._field_revisions.get(field, 0) for field in expectations}
                 if refresh_all and query_black_border and required_domains is None:
                     field_baselines["black_border"] = self._field_revisions.get("black_border", 0)
@@ -1918,15 +2088,18 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                             query_blank_screen=query_blank_screen,
                             query_black_border=query_black_border,
                             query_relative_brightness=query_relative_brightness,
+                            **query_options,
                         )
                     else:
                         ok = await self._send_state_queries(
                             query_power=query_power,
                             query_brightness=query_brightness,
                             query_color_mode=query_color,
+                            **query_options,
                         )
                 if not ok:
-                    await self._disconnect_if_current_locked(client)
+                    if generation == self._profile_generation:
+                        await self._disconnect_if_current_locked(client)
                     return False
                 attempt_deadline = (
                     deadline if attempt else time.monotonic() + max(0.0, (deadline - time.monotonic()) / 2)
@@ -1939,7 +2112,9 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                         # optional replies first; their silence never rejects the basic poll.
                         if optional_baselines:
                             await self._wait_for_revisions(optional_baselines, {}, deadline)
-                        return True
+                        return generation == self._profile_generation and self._client is client and client.is_connected
+                if generation != self._profile_generation:
+                    return False
                 if time.monotonic() >= deadline:
                     break
             if any(
@@ -2259,12 +2434,16 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
                     full = self._keep_alive_ticks % STATE_QUERY_EVERY_N_KEEP_ALIVES == 0
                     async with self._lock:
                         client = self._client
+                        generation = self._profile_generation
                         ok = await self._send_state_queries(
                             query_power=True,
                             query_brightness=full,
                             query_color_mode=full and self.profile.supports_color_mode_readback,
+                            required_domains=self.profile.setup_required_read_domains,
                         )
                     if not ok:
+                        if generation != self._profile_generation:
+                            continue
                         if client is not None:
                             await self._disconnect_if_current(client)
                         break
@@ -2328,14 +2507,19 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
         expected_brightness: list[int] | None = None
         attempted = False
         async with async_control_intent(self, ControlIntent.USER):
+            segment_revision = self._field_revisions.get("segment_colors", 0)
             try:
                 try:
                     for packet, group in zip(packets, resolved, strict=True):
 
                         def before_write(group: SegmentColorGroup = group) -> None:
                             nonlocal attempted, expected_colors, expected_brightness
-                            # Only observed pre-write siblings are preservation expectations, never local guesses.
-                            if not attempted and self.segment_state_source == "observed":
+                            # Historical observations cannot prove pre-write sibling state.
+                            if (
+                                not attempted
+                                and self.segment_state_source == "observed"
+                                and self._field_revisions.get("segment_colors", 0) > segment_revision
+                            ):
                                 expected_colors = dict(enumerate(self.segment_colors)) | expected_colors
                                 expected_brightness = list(self.segment_brightness)
                             segments, rgb = group
@@ -2376,7 +2560,11 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
 
         def before_write() -> None:
             nonlocal attempted, expected_colors, expected_brightness
-            if not attempted and self.segment_state_source == "observed":
+            if (
+                not attempted
+                and self.segment_state_source == "observed"
+                and self._field_revisions.get("segment_colors", 0) > segment_revision
+            ):
                 expected_brightness = dict(enumerate(self.segment_brightness)) | expected_brightness
                 expected_colors = list(self.segment_colors)
             updated = list(self.segment_brightness)
@@ -2387,6 +2575,7 @@ class GoveeBLECoordinator(_DreamviewMixin, _ActiveModeMixin):
             attempted = True
 
         async with async_control_intent(self, ControlIntent.USER):
+            segment_revision = self._field_revisions.get("segment_colors", 0)
             try:
                 try:
                     await self.send_command(packet, write_guard=before_write)

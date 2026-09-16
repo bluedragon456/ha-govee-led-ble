@@ -9,6 +9,7 @@ from bleak.exc import BleakError
 from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.ha_govee_led_ble.const import MODEL_PROFILES, ReadDomain, get_profile
+from custom_components.ha_govee_led_ble.control_arbiter import BLEControlArbiter
 from custom_components.ha_govee_led_ble.coordinator import GoveeBLECoordinator
 from custom_components.ha_govee_led_ble.coordinator_status import ParsedMode, decode_status_frame, parse_color_mode
 from custom_components.ha_govee_led_ble.effect_catalogue import MODEL_EFFECT_CATALOGUES
@@ -48,6 +49,7 @@ def content() -> VideoProfile:
 
 def coordinator(version: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
+        _control_arbiter=BLEControlArbiter(),
         model="H6099",
         profile=get_profile("H6099"),
         subordinate_21_version=version,

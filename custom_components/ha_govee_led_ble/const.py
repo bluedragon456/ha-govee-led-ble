@@ -105,6 +105,8 @@ class ModelProfile:
     name: str
     support_quality: SupportQuality = SupportQuality.EXPERIMENTAL
     command_grammar: str | None = None
+    # None retains the grammar's shipped operations; a set restricts physical writes.
+    command_operations: frozenset[str] | None = None
     status_grammar: str | None = None
     outbound_transform: Callable[[bytes], bytes] | None = None
     # Effect semantics require evidence independent of basic command compatibility.
@@ -537,6 +539,23 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
 
 UNSUPPORTED_PROFILE = ModelProfile("Unsupported Govee device")
 
+H6199_PACT1_PROFILE = ModelProfile(
+    "H6199 Pact 1 (power only)",
+    support_quality=SupportQuality.PARTIAL,
+    command_grammar="H6199",
+    command_operations=frozenset({"power"}),
+    status_grammar="H6199",
+    read_domains=frozenset({ReadDomain.POWER, ReadDomain.FIRMWARE, ReadDomain.HARDWARE}),
+    setup_required_read_domains=frozenset({ReadDomain.POWER}),
+)
+
+
+def device_profile(model: str, pact_type: int | None, pact_code: int | None) -> ModelProfile:
+    """Restrict positively identified Pact 1 only; unknown is not proof of Pact 2."""
+    if model == "H6199" and (pact_type, pact_code) == (1, 1):
+        return H6199_PACT1_PROFILE
+    return get_profile(model)
+
 
 def resolve_model(model: str) -> str | None:
     candidate = model.strip().upper()
@@ -571,8 +590,8 @@ def supported_effect_families(model: str) -> frozenset[str]:
     return frozenset(families)
 
 
-def supported_effect_categories(model: str) -> tuple[str, ...]:
-    profile = get_profile(model)
+def supported_effect_categories(model: str, *, profile: ModelProfile | None = None) -> tuple[str, ...]:
+    profile = get_profile(model) if profile is None else profile
     categories: set[str] = set()
     if profile.supports_custom_effects:
         categories.add(EFFECT_CATEGORY_EFFECTS)

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
-from .control_arbiter import ControlIntent
+from .control_arbiter import ControlIntent, async_control_intent
 from .generated_protocol_adapter import (
     build_black_border,
     build_blank_screen,
@@ -31,6 +31,18 @@ class ProfileWriter(Protocol):
         state_values: Mapping[str, Any] | None = None,
         expected_values: Mapping[str, Any] | None = None,
     ) -> Awaitable[None]: ...
+
+
+async def async_require_video_controls(
+    coordinator: GoveeBLECoordinator,
+    controls: Iterable[str],
+    *,
+    intent: ControlIntent = ControlIntent.USER,
+) -> None:
+    """Evaluate identity after an in-flight reconnect relinquishes control."""
+    current_intent = coordinator._control_arbiter.current_task_intent
+    async with async_control_intent(coordinator, intent if current_intent is None else current_intent):
+        require_video_controls(coordinator.profile, coordinator, controls)
 
 
 async def apply_active_video_mode(
@@ -82,7 +94,7 @@ async def apply_active_video_mode(
     state_values.update(video_mode=mode, effect=None, music_mode="off", diy_code=None)
     expectations = {f"expected_video_{field}": values[field] for field in requested_values}
     for _ in range(2 if verify else 1):
-        require_video_controls(coordinator.profile, coordinator, controls)
+        await async_require_video_controls(coordinator, controls)
         if not coordinator.is_on:
             await _send_video_setting(
                 coordinator,
@@ -126,7 +138,9 @@ async def _send_video_setting(
         if write_guard is not None:
             write_guard()
 
-    check()
+    await async_require_video_controls(coordinator, controls)
+    if write_guard is not None:
+        write_guard()
 
     if writer is None:
         # The sequence callback runs under the transport lock after every reconnect.
@@ -150,13 +164,13 @@ async def apply_white_balance(
     flag: int = 1,
 ) -> bool:
     """Author manual gains, restore an explicit flag, or reset to freshly reported defaults with None."""
-    require_video_controls(coordinator.profile, coordinator, ("white_balance",))
     scalar = coordinator.profile.video_white_balance_representation == "scalar"
     reset_fields = ("white_balance_default_flag", "white_balance_default_red", "white_balance_default_blue")
     reset = expected is None
     if reset:
         if scalar:
             raise ValueError("Scalar white balance requires an explicit value")
+        await async_require_video_controls(coordinator, ("white_balance",))
         baselines = {field: coordinator._field_revisions.get(field, 0) for field in reset_fields}
         if not await coordinator.refresh_state(refresh_display_settings=frozenset({"white_balance"})) or any(
             coordinator._field_revisions.get(field, 0) <= revision for field, revision in baselines.items()
@@ -216,7 +230,6 @@ async def apply_relative_brightness(
     writer: ProfileWriter | None = None,
     verify: bool = True,
 ) -> bool:
-    require_video_controls(coordinator.profile, coordinator, ("relative_brightness",))
     zones = coordinator.profile.video_brightness_zones
     if any(value is None for value in values):
         raise ValueError("Relative-brightness edge state has not been read; set all edges first")
@@ -259,8 +272,8 @@ async def apply_blank_screen(
     verify: bool = True,
     write_guard: Callable[[], None] | None = None,
 ) -> bool:
-    require_video_controls(coordinator.profile, coordinator, ("blank_screen",))
     if policy is None:
+        await async_require_video_controls(coordinator, ("blank_screen",))
         baselines = {
             field: coordinator._field_revisions.get(field, 0)
             for field in (
@@ -342,7 +355,6 @@ async def apply_black_border(
     writer: ProfileWriter | None = None,
     verify: bool = True,
 ) -> bool:
-    require_video_controls(coordinator.profile, coordinator, ("black_border",))
     packet = build_black_border(expected, coordinator.model)
     fields = {"black_border": expected}
     for _ in range(2 if verify else 1):

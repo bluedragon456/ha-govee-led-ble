@@ -1,4 +1,3 @@
-import asyncio
 from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
@@ -12,6 +11,7 @@ from custom_components.ha_govee_led_ble.const import (
     default_effect_categories,
     default_effect_families,
 )
+from custom_components.ha_govee_led_ble.control_arbiter import BLEControlArbiter
 from custom_components.ha_govee_led_ble.coordinator import GoveeBLECoordinator
 from custom_components.ha_govee_led_ble.coordinator_status import ParsedMode
 from custom_components.ha_govee_led_ble.h6199_calibration import WHITE_BALANCE_RESET
@@ -110,6 +110,7 @@ def _make_coord(**ov) -> MagicMock:
         color_temp_kelvin_source="initial",
         _field_revisions={},
         _domain_revisions={},
+        _profile_generation=0,
         _scene_code=None,
         _segment_groups_observed=set(),
         _segment_query_colors=None,
@@ -195,8 +196,7 @@ def _make_coord(**ov) -> MagicMock:
 
     c.mark_segment_state_optimistic = MagicMock(side_effect=mark_segment_state_optimistic)
     c.mark_segment_state_restored = MagicMock(side_effect=mark_segment_state_restored)
-    c._control_lock = asyncio.Lock()
-    c._control_arbiter = MagicMock(current_task_intent=None)
+    c._control_arbiter = c._control_lock = BLEControlArbiter()
     c.refresh_state, c.async_set_updated_data = AsyncMock(return_value=True), MagicMock()
     c.unknown_scene_code = None
 

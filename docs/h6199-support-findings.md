@@ -352,6 +352,67 @@ output, sustained throughput, and the older revision remain unqualified.
 
 ## Implementation Disposition
 
+### Active Scope For #293
+
+The target is **H6199 HW 1.00.01 / FW 1.07.02**, not H6099 and not the
+newer Dream TV used for the physical tests above.
+
+Commit `a0bfec0` removes the demonstrated software setup obstacle: only power,
+brightness and colour/mode replies are mandatory. Revision-gated white balance,
+relative brightness and blank-screen queries are omitted for the reporter's
+versions. Missing Wi-Fi identity does not prevent basic setup. The exact-version
+fake-radio regression is
+`test_issue_293_setup_requires_only_basic_readback`; it also checks that missing
+basic replies still fail rather than loading optimistically.
+
+Retired from the active investigation: WB state loss, hidden Spectrum/Rolling
+colour controls, rejection of sensitivity zero, misclassified DIY readback and
+stale segment rollback. Their fixes and qualification limits remain recorded
+below. Expanded DIY, legacy DreamView and cloud firmware checks are separate
+work, not prerequisites for resolving this setup failure.
+
+Remaining gate: an owner test on the older hardware with an exact candidate
+build. If setup still fails, identify missing/rejected basic replies and the
+actual GATT characteristics from that attempt. Pact 1 differs in brightness,
+colour, music and segment formats, not just segment readback. Positively
+identified Pact 1/1 therefore selects the [power-only profile](h6199-pact1.md);
+the reporter's hardware version alone does not select it. The exact-version
+test above uses synthetic percentage/static-mode replies and establishes setup
+policy, not qualification of the older wire formats. The claimed `AA 14`
+handshake, three-second watchdog and need for a longer timeout remain hypotheses.
+
+### Independent RC Review
+
+The reporter candidate builds on `v7.6.0-rc.2.h6199` (`a0bfec0`). Independent
+runtime, consumer/applicability and Kaitai reviews found and corrected:
+
+- Optional-query write failures rejecting successful basic setup/keepalive;
+  required errors and actual disconnects still fail. Successfully sent optional
+  replies are collected within the existing deadline, including video registers.
+- Unrelated white-balance recovery blocking power restoration after non-video
+  deployments. New non-video snapshots have an explicit empty video scope.
+- Historical segment observations incorrectly constraining untouched siblings;
+  only transaction-fresh sibling observations are preservation expectations.
+- Stale static-mode Gradient falsely confirming an independent register write.
+  Independent confirmation now requires its own register observation.
+- Qualification evaluated during background reconnect, before admission; stale
+  saved/default video choices; and missing publication of Pact changes.
+- Known Pact 1 accepting incompatible Pact 2 operations. The effective profile
+  now governs entities, selectors, compilation and the physical write boundary.
+  Profile changes invalidate in-flight controls and bound read-batch retries.
+- Lossy Kaitai command/display extensions and video-reply tails, missing H6099
+  direction ACK classification, unsupported music selector state mutation, and
+  recovery storage rejecting a decoded zero-valued relative-brightness setting.
+
+Regression coverage is in `test_query_isolation.py`, `test_revision_consumers.py`,
+`test_reconnect_admission.py`, `test_gradient_observations.py`,
+`test_h6199_pact1.py`, `test_profile_transitions.py`, and
+`test_protocol_review_regressions.py`. Final `make check` passed: 2,243 Python
+tests passed, 79 skipped, plus frontend unit/browser checks, lint, type checking,
+and generated-code verification. No physical-device test was performed for these
+review corrections. General upload ACK sequencing and hardware qualification
+remain separate from these confirmed fixes.
+
 Software checks below run through `make check`. They do not supersede the
 official-app capture and owner-qualification requirements in CONTRIBUTING.md.
 No installed integration or physical device has been changed during this

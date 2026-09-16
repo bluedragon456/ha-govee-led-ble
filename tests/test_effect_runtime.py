@@ -13,7 +13,7 @@ import pytest
 from homeassistant.core import HomeAssistant
 
 from custom_components.ha_govee_led_ble.const import MODEL_PROFILES, ReadDomain, get_profile
-from custom_components.ha_govee_led_ble.control_arbiter import ControlIntent, async_control_intent
+from custom_components.ha_govee_led_ble.control_arbiter import BLEControlArbiter, ControlIntent, async_control_intent
 from custom_components.ha_govee_led_ble.coordinator import GoveeBLECoordinator
 from custom_components.ha_govee_led_ble.effect_active_workspace import (
     ActiveEffectWorkspace,
@@ -369,6 +369,7 @@ def _profile_coordinator(model: str):
     from tests.test_h6199_capabilities import QUALIFIED
 
     coordinator = _coordinator()
+    coordinator._control_arbiter = coordinator._control_lock = BLEControlArbiter()
     if model == "H6199":
         vars(coordinator).update(QUALIFIED)
     coordinator.active_mode = None
@@ -1132,7 +1133,7 @@ async def test_music_deployment_before_first_control_preserves_native_selection(
         assert failed.verification_confidence is ObservationConfidence.UNKNOWN
         assert failed.error_code == ("operation_cancelled" if cancelled else "RuntimeError")
         assert failed.progress_current == 0
-        assert failed.prior_state == before
+        assert failed.prior_state == replace(before, video_restore_controls=())
         assert coordinator.control_write_attempts == 0
         physical.assert_not_awaited()
         restore.assert_not_awaited()

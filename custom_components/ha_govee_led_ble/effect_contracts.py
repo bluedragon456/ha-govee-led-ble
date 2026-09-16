@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final
 
-from .const import default_effect_categories, get_profile
+from .const import ModelProfile, default_effect_categories, get_profile, supported_effect_categories
 from .effect_domain import EFFECT_SCHEMA_VERSION, JsonValue
 from .effect_limits import (
     MAX_DEPLOYMENT_RECORDS,
@@ -565,8 +565,10 @@ def device_effect_capabilities(
     light_entity_id: str | None = None,
     effect_categories: tuple[str, ...] | None = None,
     physical_ic_count: int | None = None,
+    profile: ModelProfile | None = None,
 ) -> DeviceEffectCapabilities:
-    return DeviceEffectCapabilities(
+    profile = get_profile(model) if profile is None else profile
+    capabilities = DeviceEffectCapabilities(
         config_entry_id=config_entry_id,
         light_entity_id=light_entity_id,
         model=model,
@@ -581,6 +583,23 @@ def device_effect_capabilities(
         music=studio_apply_capability_state(model, CapabilityWorkflow.NATIVE_MUSIC),
         video=studio_apply_capability_state(model, CapabilityWorkflow.VIDEO),
         workshop=studio_apply_capability_state(model, CapabilityWorkflow.WORKSHOP),
-        readback=get_profile(model).effect_readback,
-        effect_categories=(default_effect_categories(model) if effect_categories is None else effect_categories),
+        readback=profile.effect_readback,
+        effect_categories=tuple(
+            category
+            for category in (default_effect_categories(model) if effect_categories is None else effect_categories)
+            if category in supported_effect_categories(model, profile=profile)
+        ),
     )
+    if not supported_effect_categories(model, profile=profile):
+        capabilities = replace(
+            capabilities,
+            painted=CapabilityState.UNSUPPORTED,
+            single=CapabilityState.UNSUPPORTED,
+            multi=CapabilityState.UNSUPPORTED,
+            palette_diy=CapabilityState.UNSUPPORTED,
+            advanced=CapabilityState.UNSUPPORTED,
+            music=CapabilityState.UNSUPPORTED,
+            video=CapabilityState.UNSUPPORTED,
+            workshop=CapabilityState.UNSUPPORTED,
+        )
+    return capabilities

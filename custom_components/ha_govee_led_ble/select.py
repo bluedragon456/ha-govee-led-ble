@@ -9,6 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import GoveeBLEConfigEntry
 from .const import DOMAIN
+from .control_arbiter import ControlIntent, async_control_intent
 from .effect_contracts import CapabilityState
 from .effect_setup import get_effect_backend
 from .entity import GoveeBLEEntity
@@ -66,14 +67,14 @@ class GoveeBLEControlSelect(GoveeBLEEntity, SelectEntity):
         return self.options[value] if type(value) is int and value in (0, 1) else None
 
     async def async_select_option(self, option: str) -> None:
-        if (
-            option not in self.options
-            or h6199_camera_controls_state(self.coordinator.model, self.coordinator) is not CapabilityState.SUPPORTED
-        ):
+        if option not in self.options:
             raise ServiceValidationError(translation_domain=DOMAIN, translation_key="invalid_control_request")
-        if backend := get_effect_backend(self.hass):
-            await backend.preview.async_supersede_device(self._entry.entry_id, reason="home_assistant_control")
-        try:
-            await self.coordinator.async_set_h6199_control(self._control, self.options.index(option))
-        except (BleakError, ValueError, TimeoutError) as err:
-            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="device_command_failed") from err
+        async with async_control_intent(self.coordinator, ControlIntent.USER):
+            if h6199_camera_controls_state(self.coordinator.model, self.coordinator) is not CapabilityState.SUPPORTED:
+                raise ServiceValidationError(translation_domain=DOMAIN, translation_key="invalid_control_request")
+            if backend := get_effect_backend(self.hass):
+                await backend.preview.async_supersede_device(self._entry.entry_id, reason="home_assistant_control")
+            try:
+                await self.coordinator.async_set_h6199_control(self._control, self.options.index(option))
+            except (BleakError, ValueError, TimeoutError) as err:
+                raise HomeAssistantError(translation_domain=DOMAIN, translation_key="device_command_failed") from err

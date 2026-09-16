@@ -41,6 +41,7 @@ from .const import (
     ModelProfile,
     ReadDomain,
     effect_category_for_content_kind,
+    supported_effect_categories,
 )
 from .control_arbiter import ControlIntent, async_control_intent
 from .coordinator import GoveeBLECoordinator
@@ -83,7 +84,7 @@ from .light_services import (
 )
 from .music_commands import prepare_music_request
 from .music_semantics import music_variant
-from .native_profile_controls import _send_video_setting
+from .native_profile_controls import _send_video_setting, async_require_video_controls
 from .native_profile_controls import apply_active_video_mode as apply_active_video_mode
 from .native_scenes import build_native_scene_packets
 from .scenes import MODEL_SCENES
@@ -224,14 +225,7 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
         super().__init__(coordinator)
         self._attr_unique_id = coordinator.address.replace(":", "").lower()
         self._attr_device_info = coordinator.device_info
-        supported_color_modes: set[ColorMode] = set()
-        if coordinator.profile.supports_rgb:
-            supported_color_modes.add(ColorMode.RGB)
-        if coordinator.profile.supports_color_temperature:
-            supported_color_modes.add(ColorMode.COLOR_TEMP)
-        if not supported_color_modes:
-            supported_color_modes.add(ColorMode.ONOFF)
-        self._attr_supported_color_modes = supported_color_modes
+        supported_color_modes = self.supported_color_modes
         self._attr_min_color_temp_kelvin = coordinator.profile.min_color_temp_kelvin
         self._attr_max_color_temp_kelvin = coordinator.profile.max_color_temp_kelvin
         self._attr_color_mode = (
@@ -250,6 +244,7 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
     @contextmanager
     def _rollback(self) -> Generator[None]:
         snap = {f: copy(getattr(self.coordinator, f)) for f in _STATE_FIELDS}
+        generation = self.coordinator._profile_generation
         revisions = dict(self.coordinator._field_revisions)
         segment_revision = self.coordinator._domain_revisions.get(ReadDomain.SEGMENTS, 0)
         mode_snap = self._attr_color_mode
@@ -266,6 +261,9 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
             )
             segment_page_received = self.coordinator._domain_revisions.get(ReadDomain.SEGMENTS, 0) != segment_revision
             for f, v in snap.items():
+                if self.coordinator._profile_generation != generation:
+                    # A newly identified wire family invalidates the old control snapshot.
+                    continue
                 # Segment pages prove neither mode nor a failed command's optimistic state.
                 if f.startswith("_segment_"):
                     if segment_page_received:
@@ -303,18 +301,32 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
         return self.coordinator.is_on
 
     @property
+    def supported_color_modes(self) -> set[ColorMode]:
+        profile = self.coordinator.profile
+        modes = set()
+        if profile.supports_rgb:
+            modes.add(ColorMode.RGB)
+        if profile.supports_color_temperature:
+            modes.add(ColorMode.COLOR_TEMP)
+        return modes or {ColorMode.ONOFF}
+
+    @property
     def brightness(self) -> int | None:
+        if self.supported_color_modes == {ColorMode.ONOFF}:
+            return None
         return round(self.coordinator.brightness_pct * 255 / 100)
 
     @property
     def color_mode(self) -> ColorMode | None:
         coordinator = self.coordinator
+        if self.supported_color_modes == {ColorMode.ONOFF}:
+            return ColorMode.ONOFF
         if coordinator.color_mode in (None, ParsedMode.COLOUR):
             if coordinator.color_temp_kelvin is not None and coordinator.color_temp_kelvin_source != "initial":
                 return ColorMode.COLOR_TEMP
             if coordinator.rgb_color_source != "initial":
                 return ColorMode.RGB
-        return self._attr_color_mode
+        return self._attr_color_mode if self._attr_color_mode in self.supported_color_modes else ColorMode.RGB
 
     @property
     def rgb_color(self) -> tuple[int, int, int] | None:
@@ -359,6 +371,8 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
 
     @property
     def effect_list(self) -> list[str]:
+        if not supported_effect_categories(self.coordinator.model, profile=self.coordinator.profile):
+            return []
         active_custom = self._matching_active_workspace() is not None
         entries = self._selector_entries(active_custom=active_custom)
         if not entries and not active_custom and not self._effect_categories:
@@ -433,18 +447,43 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
     def _selector_entries(self, *, active_custom: bool | None = None) -> tuple[EffectSelectorEntry, ...]:
         if active_custom is None:
             active_custom = self._matching_active_workspace() is not None
+
+        def available(content: object) -> bool:
+            try:
+                validate_video_request(self.coordinator, content)
+            except ValueError:
+                return False
+            return True
+
+        video_modes = self.coordinator.profile.video_modes
+        if self._effect_backend is not None and self._config_entry_id is not None:
+            video_modes = tuple(
+                mode
+                for mode in video_modes
+                if (
+                    stored := self._effect_backend.template_defaults.get(
+                        self._config_entry_id, f"template:video:{mode}"
+                    )
+                )
+                is None
+                or stored.model != self.coordinator.model
+                or available(stored.content)
+            )
         return effect_selector_entries(
             self.coordinator.model,
             self._effect_categories,
-            self._library_snapshot.items,
+            (item for item in self._library_snapshot.items if available(item.content)),
             prefix_effect_names=getattr(self.coordinator, "prefix_effect_names", False) is True,
             always_include_custom_effects=getattr(self.coordinator, "always_include_custom_effects", False) is True,
             active_custom=active_custom,
             native_categories=self._native_selector_categories,
             profile=self.coordinator.profile,
+            video_modes=video_modes,
         )
 
     def _matching_active_workspace(self) -> Any | None:
+        if not supported_effect_categories(self.coordinator.model, profile=self.coordinator.profile):
+            return None
         if self._effect_backend is None or self._config_entry_id is None:
             return None
         active_workspaces = getattr(self._effect_backend, "active_workspaces", None)
@@ -462,7 +501,9 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
     @property
     def _effect_categories(self) -> frozenset[str]:
         categories = getattr(self.coordinator, "effect_categories", None)
-        return categories if isinstance(categories, frozenset) else frozenset(EFFECT_CATEGORIES)
+        return (categories if isinstance(categories, frozenset) else frozenset(EFFECT_CATEGORIES)) & frozenset(
+            supported_effect_categories(self.coordinator.model, profile=self.coordinator.profile)
+        )
 
     @property
     def _native_selector_categories(self) -> frozenset[str]:
@@ -755,6 +796,8 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
             await coordinator.send_command(packet)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
+        if ATTR_EFFECT in kwargs:
+            await async_require_video_controls(self.coordinator, ())
         active_workspace = self._matching_active_workspace()
         custom_requested = (
             ATTR_EFFECT in kwargs
@@ -818,12 +861,12 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
                     validate_compiled_geometry(compiled, self.coordinator.profile)
                     validate_video_request(self.coordinator, current.content)
 
-                validate_video_request(self.coordinator, current.content)
-                await self._async_supersede_preview()
                 async with async_control_intent(
                     self.coordinator,
                     ControlIntent.USER,
                 ):
+                    guard()
+                    await self._async_supersede_preview()
                     if turn_on_kwargs is not None:
                         await self._async_turn_on(
                             video_write_guard=guard,
@@ -881,6 +924,7 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
         )
         item: LibraryItem | None
         if effect is not None:
+            await async_require_video_controls(self.coordinator, ())
             item = self._saved_effect(effect)
         else:
             try:
@@ -964,6 +1008,8 @@ class GoveeBLELight(_GoveeLightServicesMixin, GoveeBLEEntity, RestoreEntity, Lig
                     self.coordinator, packet, frozenset(), writer=None, write_guard=video_write_guard
                 )
 
+        if ATTR_BRIGHTNESS in kwargs:
+            self._require_support("brightness", supported=self.supported_color_modes != {ColorMode.ONOFF})
         if video_write_guard is not None:
             video_write_guard()
         power_on = partial(

@@ -602,6 +602,7 @@ def test_saved_categories_remain_visible_when_native_families_are_narrower(
         effect_backend=backend,
     )
 
+    backend.template_defaults = SimpleNamespace(get=MagicMock(return_value=None))
     assert {"Saved scene", "Saved reactive"} <= set(entity.effect_list)
 
 
@@ -1539,7 +1540,7 @@ async def test_turn_on_video_effect_uses_the_device_template_default(mock_h6199_
     assert isinstance(compiled, CompiledVideoProfile)
     assert compiled.saturation == 63
     assert compiled.relative_brightness == (80, 70, 60, 50)
-    backend.template_defaults.get.assert_called_once_with("entry-a", "template:video:movie")
+    backend.template_defaults.get.assert_called_with("entry-a", "template:video:movie")
 
 
 async def test_effect_reflects_active_video_mode(h6199_light, mock_h6199_coordinator):

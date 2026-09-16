@@ -23,6 +23,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, ModelProfile, supported_effect_categories
+from .control_arbiter import ControlIntent
 from .effect_backend import EffectBackend
 from .effect_catalogue import (
     custom_effect_catalogue_payload,
@@ -37,6 +38,7 @@ from .effect_domain import (
     OpaqueContent,
     Origin,
     SourceKind,
+    VideoProfile,
     effect_content_from_dict,
     effect_content_hash,
     effect_content_to_dict,
@@ -128,7 +130,8 @@ from .effect_websocket_schema import (
     WS_USER_STATE_UPDATE,
     strict_int,
 )
-from .video_applicability import validate_video_request, video_control_states
+from .native_profile_controls import async_require_video_controls
+from .video_applicability import requested_video_controls, video_control_states
 
 BACKEND_DATA_KEY = "effect_backend"
 PREVIEW_SESSION_NOT_FOUND_CODE = "preview_session_not_found"
@@ -157,7 +160,8 @@ async def ws_editor_devices(
     entries = [
         entry
         for entry in hass.config_entries.async_entries(DOMAIN)
-        if entry.state is ConfigEntryState.LOADED and supported_effect_categories(entry.runtime_data.model)
+        if entry.state is ConfigEntryState.LOADED
+        and supported_effect_categories(entry.runtime_data.model, profile=entry.runtime_data.profile)
     ]
     if len(entries) > MAX_EDITOR_DEVICES:
         connection.send_error(
@@ -215,6 +219,7 @@ def _device_payload(
         light_entity_id=_light_entity_id(hass, entry.entry_id),
         effect_categories=tuple(coordinator.effect_categories),
         physical_ic_count=coordinator.profile.physical_ic_count,
+        profile=coordinator.profile,
     ).to_dict()
     device["active_state"] = observed.to_public_dict()
     device.update(device_music_settings(coordinator.model, profile=coordinator.profile))
@@ -328,6 +333,9 @@ def ws_scene_catalogue_list(
         connection.send_error(msg["id"], "not_found", "target config entry is not loaded")
         return
     coordinator = entry.runtime_data
+    if not coordinator.profile.supports_scenes:
+        connection.send_error(msg["id"], "unsupported_model", "Device profile supports no scenes")
+        return
     try:
         catalogue = scene_catalogue_payload(coordinator.model)
     except ValueError as exc:
@@ -364,6 +372,9 @@ def ws_scene_catalogue_get(
     entry = hass.config_entries.async_get_entry(msg["config_entry_id"])
     if entry is None or entry.domain != DOMAIN or entry.state is not ConfigEntryState.LOADED:
         connection.send_error(msg["id"], "not_found", "target config entry is not loaded")
+        return
+    if not entry.runtime_data.profile.supports_scenes:
+        connection.send_error(msg["id"], "unsupported_model", "Device profile supports no scenes")
         return
     try:
         backend = _backend(hass)
@@ -405,6 +416,9 @@ async def ws_scene_apply(
     entry = hass.config_entries.async_get_entry(msg["config_entry_id"])
     if entry is None or entry.domain != DOMAIN or entry.state is not ConfigEntryState.LOADED:
         connection.send_error(msg["id"], "not_found", "target config entry is not loaded")
+        return
+    if not entry.runtime_data.profile.supports_scenes:
+        connection.send_error(msg["id"], "unsupported_model", "Device profile supports no scenes")
         return
     try:
         backend = _backend(hass)
@@ -514,6 +528,9 @@ async def ws_scene_default_set(
     entry = hass.config_entries.async_get_entry(msg["config_entry_id"])
     if entry is None or entry.domain != DOMAIN or entry.state is not ConfigEntryState.LOADED:
         connection.send_error(msg["id"], "not_found", "target config entry is not loaded")
+        return
+    if not entry.runtime_data.profile.supports_scenes:
+        connection.send_error(msg["id"], "unsupported_model", "Device profile supports no scenes")
         return
     backend = _backend(hass)
     try:
@@ -1335,7 +1352,10 @@ async def ws_apply(
             expected_version=msg["expected_version"],
             profile=entry.runtime_data.profile,
         ) as item:
-            validate_video_request(entry.runtime_data, item.content)
+            if isinstance(item.content, VideoProfile):
+                await async_require_video_controls(
+                    entry.runtime_data, requested_video_controls(item.content), intent=ControlIntent.APPLY
+                )
             await backend.preview.async_supersede_device(entry.entry_id, reason="committed_apply")
             result = await backend.engine.async_apply_saved(
                 entry.runtime_data,
@@ -1408,7 +1428,10 @@ async def ws_apply_snapshot(
             diy_code=resolve_diy_code(item, model=entry.runtime_data.model),
             profile=entry.runtime_data.profile,
         )
-        validate_video_request(entry.runtime_data, item.content)
+        if isinstance(item.content, VideoProfile):
+            await async_require_video_controls(
+                entry.runtime_data, requested_video_controls(item.content), intent=ControlIntent.APPLY
+            )
         await backend.preview.async_supersede_device(entry.entry_id, reason="committed_apply")
         result = await backend.engine.async_apply_snapshot(
             entry.runtime_data,

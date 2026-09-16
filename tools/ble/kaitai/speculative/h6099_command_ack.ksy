@@ -16,7 +16,7 @@ seq:
     type: u1
     enum: command_op
     valid:
-      any-of: [command_op::power, command_op::brightness, command_op::mode, command_op::display_setting, command_op::relative_brightness]
+      any-of: [command_op::power, command_op::brightness, command_op::mode, command_op::installation_direction, command_op::display_setting, command_op::relative_brightness]
   - id: status
     type: u1
     valid: 0
@@ -29,5 +29,6 @@ enums:
     0x01: power
     0x04: brightness
     0x05: mode
+    0x30: installation_direction
     0xa9: display_setting
     0xae: relative_brightness

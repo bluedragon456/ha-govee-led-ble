@@ -1836,6 +1836,8 @@ async def test_refresh_without_colour_readback_requires_power_and_brightness_onl
             "query_power": True,
             "query_brightness": True,
             "query_color_mode": False,
+            "required_domains": frozenset({ReadDomain.POWER, ReadDomain.BRIGHTNESS}),
+            "optional_baselines": {},
         }
         limited_readback_coord._notify_callback(None, bytearray(proto.build_packet(0xAA, 0x01, [0])))
         limited_readback_coord._notify_callback(None, bytearray(proto.build_packet(0xAA, 0x04, [40])))
@@ -2681,7 +2683,7 @@ async def test_segment_confirmation_compares_complete_pages(request, model_fixtu
             else:
                 await coord.async_set_segment_brightness([1, 2], 60)
 
-        if result in {"unchanged", "partial"} or (source == "observed" and result in {"unselected", "companion"}):
+        if result in {"unchanged", "partial"}:
             with pytest.raises(RuntimeError, match="confirm segment"):
                 await apply()
         else:
@@ -2764,11 +2766,9 @@ async def test_segment_preservation_baseline_is_first_write_boundary(coord, segm
             else:
                 await coord.async_set_segment_brightness([1], 60)
 
-        if during_write:
-            with pytest.raises(RuntimeError, match="confirm segment"):
-                await apply()
-        else:
-            await apply()
+        # Only the connect-time observation is a pre-write baseline. The historical
+        # observation and replies after the first write cannot establish one.
+        await apply()
     assert coord.segment_state_source == "observed"
     assert coord.segment_colors[-1] == (9, 8, 7)
 

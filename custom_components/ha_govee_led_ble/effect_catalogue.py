@@ -6,7 +6,7 @@ import base64
 from dataclasses import dataclass, replace
 from typing import Final
 
-from .const import MODEL_PROFILES, MUSIC_MODE_SLUGS, ModelProfile, get_profile
+from .const import MODEL_PROFILES, MUSIC_MODE_SLUGS, ModelProfile, get_profile, supported_effect_categories
 from .effect_contracts import (
     CapabilityState,
     CapabilityWorkflow,
@@ -218,7 +218,7 @@ class ModelEffectCatalogue:
 
     def to_dict(self, *, profile: ModelProfile | None = None) -> dict[str, JsonValue]:
         profile = MODEL_PROFILES[self.sku] if profile is None else profile
-        return {
+        result: dict[str, JsonValue] = {
             "sku": self.sku,
             "painted_effects": [dict(effect) for effect in self.painted_effects],
             **(
@@ -291,6 +291,21 @@ class ModelEffectCatalogue:
             },
             "apply": self.apply.to_dict(),
         }
+        if profile.command_operations is not None and not supported_effect_categories(self.sku, profile=profile):
+            for key in (
+                "painted_effects",
+                "effects",
+                "music_modes",
+                "video_modes",
+                "templates",
+                "workshop_templates",
+                "workflows",
+            ):
+                result[key] = []
+            result["music_settings"] = {}
+            result["supports"] = {key: CapabilityState.UNSUPPORTED.value for key in self.supports.to_dict()}
+            result["apply"] = {key: CapabilityState.UNSUPPORTED.value for key in self.apply.to_dict()}
+        return result
 
 
 # GoveeHome V7.5.30 exposes these basic Type04 families through
@@ -923,6 +938,12 @@ def resolve_catalogue_template(
     *,
     profile: ModelProfile | None = None,
 ) -> CatalogueTemplate:
+    if (
+        profile is not None
+        and profile.command_operations is not None
+        and not supported_effect_categories(model, profile=profile)
+    ):
+        raise ValueError("Device profile supports no effect templates")
     catalogue = MODEL_EFFECT_CATALOGUES.get(model)
     if catalogue is None:
         raise ValueError(f"{model} has no custom-effect catalogue")

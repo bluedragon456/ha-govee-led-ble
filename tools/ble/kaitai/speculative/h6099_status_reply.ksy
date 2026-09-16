@@ -132,6 +132,8 @@ types:
     seq:
       - id: value
         type: u1
+      - id: unknown_tail
+        size-eos: true
   blank_screen_state:
     seq:
       - id: is_enabled
@@ -143,10 +145,14 @@ types:
         type: u2
       - id: same_tone_duration_seconds
         type: u2
+      - id: unknown_tail
+        size-eos: true
   black_border_state:
     seq:
       - id: is_enabled
         type: u1
+      - id: unknown_tail
+        size-eos: true
   relative_brightness_body:
     seq:
       - id: selector
@@ -224,6 +230,8 @@ types:
         type: u1
       - id: softness
         type: u1
+      - id: unknown_tail
+        size-eos: true
   scene_state:
     seq:
       - id: scene_id

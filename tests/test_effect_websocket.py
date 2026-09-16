@@ -297,7 +297,7 @@ async def test_scene_default_websocket_persists_full_content_without_ble(
         for item in SCENE_ENTRIES["H617A"]
         if item.scene_type == 2 and item.speed is not None and item.speed.option_count > 1
     )
-    coordinator = SimpleNamespace(model="H617A", async_apply_native_scene=AsyncMock())
+    coordinator = SimpleNamespace(model="H617A", profile=get_profile("H617A"), async_apply_native_scene=AsyncMock())
     entry = SimpleNamespace(
         entry_id="entry-a",
         domain=DOMAIN,

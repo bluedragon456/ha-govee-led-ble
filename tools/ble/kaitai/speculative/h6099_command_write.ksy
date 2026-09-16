@@ -161,10 +161,14 @@ types:
             'display_setting::scalar_white_balance': scalar_white_balance_payload
             'display_setting::blank_screen': blank_screen_payload
             'display_setting::black_border': black_border_payload
+      - id: unknown_tail
+        size-eos: true
   scalar_white_balance_payload:
     seq:
       - id: value
         type: u1
+      - id: unknown_tail
+        size-eos: true
   blank_screen_payload:
     seq:
       - id: is_on
@@ -176,11 +180,15 @@ types:
         type: u2
       - id: same_tone_duration_seconds
         type: u2
+      - id: unknown_tail
+        size-eos: true
   black_border_payload:
     doc: Android 7.6.01 pact_h6099 BlackBorderRemoveController1 writes A9 0B 01 enabled.
     seq:
       - id: is_on
         type: u1
+      - id: unknown_tail
+        size-eos: true
   music_body:
     seq:
       - id: mode

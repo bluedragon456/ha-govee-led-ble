@@ -10,7 +10,7 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, Literal, assert_never
 
-from .const import MUSIC_MODE_SLUGS, ModelProfile, get_profile
+from .const import MUSIC_MODE_SLUGS, ModelProfile, get_profile, supported_effect_categories
 from .effect_catalogue import (
     H617A_TYPE04_APPLY_CODE,
     H617A_WORKSHOP_APPLY_CODE,
@@ -181,6 +181,8 @@ def validate_compiled_geometry(compiled: CompiledApplication, profile: ModelProf
 
 def compatibility(item: LibraryItem, model: str, *, profile: ModelProfile | None = None) -> CompatibilityResult:
     profile = get_profile(model) if profile is None else profile
+    if profile.command_operations is not None and not supported_effect_categories(model, profile=profile):
+        return CompatibilityResult(CompatibilityState.INCOMPATIBLE, ("Device profile supports no effects",))
     content = item.content
     if isinstance(content, OpaqueContent):
         return CompatibilityResult(

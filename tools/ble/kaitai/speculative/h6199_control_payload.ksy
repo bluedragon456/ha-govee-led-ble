@@ -28,6 +28,8 @@ types:
     seq:
       - id: value
         type: u1
+      - id: unknown_tail
+        size-eos: true
   camera_state:
     seq:
       - id: value

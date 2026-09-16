@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from kaitaistruct import ConsistencyError, KaitaiStream, KaitaiStructError, ReadWriteKaitaiStruct
 
-from .const import ReadDomain, get_profile
+from .const import ModelProfile, ReadDomain, get_profile
 from .music_semantics import MusicVariant, music_variant
 from .transport import A3_CHUNK_SIZE, xor_checksum
 
@@ -259,6 +259,27 @@ def parse_command(frame: bytes, model: str = "H617A") -> Any | None:
     return parse_command_result(frame, model).parsed
 
 
+def require_profile_packet(frame: bytes, profile: ModelProfile) -> None:
+    """Enforce restricted operations using generated command/query semantics."""
+    if profile.command_operations is None:
+        return
+    command = _parse_xor_frame(frame, profile.command_grammar, _COMMAND_ROOTS).parsed
+    if command is not None and getattr(command.opcode, "name", None) in profile.command_operations:
+        return
+    query = _parse_xor_frame(
+        frame,
+        profile.command_grammar,
+        {
+            "H6199": ("h6199_status_query", H6199StatusQuery),
+            "H6099": ("h6099_status_query", H6099StatusQuery),
+            "H617A": ("status_query", StatusQuery),
+        },
+    ).parsed
+    if query is not None and getattr(query.domain, "name", None) in profile.read_domains:
+        return
+    raise ValueError(f"{profile.name} does not support this operation")
+
+
 def parse_a3_effect_envelope(envelope: bytes, model: str) -> Any:
     """Parse one validated, padded A3 effect envelope through its generated root."""
     if not isinstance(envelope, bytes):
@@ -404,6 +425,7 @@ def build_h6199_control(control: str, value: int) -> bytes:
     root.opcode = getattr(H6199CommandWrite.CommandOp, control)
     root.body = _child(H6199ControlPayload.WriteValue, root)
     root.body.value = value
+    root.body.unknown_tail = bytes(16)
     return _serialize_xor(root)
 
 
@@ -1095,7 +1117,9 @@ def build_white_balance(red: int, blue: int | None, model: str, *, flag: int = 1
         payload.manual = flag
         payload.red = red
         payload.blue = blue
+    payload.unknown_tail = b""
     body.payload = payload
+    body.unknown_tail = bytes(15 - body.len)
     root.body = body
     return _serialize_xor(root)
 
@@ -1131,7 +1155,9 @@ def build_blank_screen(
     payload.detection = root_type.BlankScreenDetection(detection)
     payload.low_brightness_duration_seconds = low_brightness_duration_seconds
     payload.same_tone_duration_seconds = same_tone_duration_seconds
+    payload.unknown_tail = b""
     body.payload = payload
+    body.unknown_tail = bytes(15 - body.len)
     root.body = body
     return _serialize_xor(root)
 
@@ -1153,7 +1179,9 @@ def build_black_border(enabled: bool, model: str) -> bytes:
     body.len = 1
     payload = _child(root_type.BlackBorderPayload, body)
     payload.is_on = int(enabled)
+    payload.unknown_tail = b""
     body.payload = payload
+    body.unknown_tail = bytes(15 - body.len)
     root.body = body
     return _serialize_xor(root)
 
