@@ -11,13 +11,22 @@ Local BLE control and effect authoring for supported Govee lights from Home Assi
 
 | Model | Status | Controls and limitations |
 | --- | --- | --- |
-| **H6099** | Experimental | Exact-model candidate: basic light controls, 14 logical zones, 240 scenes, Basic/Mixed/Graffiti DIY, video and onboard music, plus service-only installation controls and DreamView. [Implemented behaviour, evidence, and limits](docs/h6099-support.md); owner qualification is outstanding. |
+| **H6099** | Experimental | Exact-model candidate: basic light controls, 14 logical zones, 240 scenes, Basic/Mixed/Graffiti DIY, video and onboard music, plus service-only installation controls and DreamView. Owner-reported connection success; control qualification remains outstanding. Requires manual addition. [Evidence and limits](docs/h6099-support.md). |
 | **H617A** | Supported | Power, brightness, RGB, colour temperature, 15 segments, 83 scenes, 11 music modes and Effect Studio |
 | **H6199** | Supported | Power, brightness, RGB, colour temperature, 15 segments, 240 scenes, video and music modes, advanced controls and Effect Studio |
 | **H617E** | Compatible | H617A-compatible controls, effects and music modes with its exact 240-scene catalogue and retained legacy scene-name compatibility; exact-model protocol documentation remains incomplete |
 | **H6076** | Partial | Power, brightness, RGB and 2700–6500 K colour temperature; colour-mode readback, segments, scenes, music and Effect Studio remain unavailable |
 
 **Experimental** is a model-specific prerelease awaiting owner confirmation.  **Partial** has confirmed controls plus known disabled gaps.  **Compatible** has no known issue in its exposed feature set but incomplete documentation.  **Supported** is fully documented, with every known feature implemented or explicitly excluded and evidence-backed Kaitai coverage for every enabled wire path.  See [CONTRIBUTING.md](CONTRIBUTING.md) for the request, speculative-schema, prerelease and promotion process.
+
+H6099 is included in stable 7.6.0 by explicit maintainer approval as an exception
+to the prerelease-only Experimental policy. This does not promote its support
+status or establish compatibility for its unqualified controls.
+
+H6199 capabilities depend on the detected protocol and hardware/firmware.
+Positively identified Pact 1/1 devices expose on/off only; brightness, colour,
+effects and Effect Studio remain unavailable. Unknown Pact retains existing
+behaviour without establishing compatibility. See [protocol limits](docs/h6199-pact1.md).
 
 H6099 uses exact Android 7.6.01 app-derived hypotheses, not an H6199 profile
 alias. Graffiti and dependent music parameters require discovered physical IC
@@ -62,7 +71,8 @@ Restart Home Assistant after updating this integration through HACS or replacing
 
 ## Configuration
 
-The integration auto-discovers exact listed models.  Experimental models are available only in their model-specific prerelease.
+The integration auto-discovers H617A, H617E, H6076 and H6199. H6099 requires
+manual addition or reconfiguration and is included as Experimental in 7.6.0.
 
 To add manually in Home Assistant:
 

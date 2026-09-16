@@ -10,9 +10,17 @@ acceptance, visible behaviour, or restoration on an owner's firmware.
 
 This document follows the [contributor model plan](../CONTRIBUTING.md#planning-support-for-a-new-model).
 The [global scope policy](scope-policy.md) and
-[support lifecycle](../CONTRIBUTING.md#support-lifecycle) apply without
-model-specific exceptions. H6099 has its own profile, grammars, capability
+[support lifecycle](../CONTRIBUTING.md#support-lifecycle) apply, with the explicit
+maintainer-approved 7.6.0 inclusion exception described below.
+H6099 has its own profile, grammars, capability
 contract, and catalogue; it is not an H6199 profile alias.
+
+The owner [reported successful connection on v7.6.0-rc.1.h6099](https://github.com/teh-hippo/ha-govee-led-ble/issues/258#issuecomment-5681092324).
+Control, rendering, readback and restoration qualification remain outstanding;
+the report does not identify hardware or firmware versions. The maintainer
+approved inclusion in stable 7.6.0 while retaining Experimental status and
+speculative schemas. H6099 requires manual addition or reconfiguration; no
+automatic-discovery matcher is registered for this model.
 
 ## Research Findings
 

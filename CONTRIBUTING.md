@@ -88,6 +88,10 @@ The progression is:
 7. Supported is a later promotion after the model's features and explicit exclusions are completely documented.
 
 An Experimental profile that receives no owner confirmation is not merged as stable support.
+Release 7.6.0 has an explicit maintainer-approved exception for H6099: its owner
+reported connection success, but control qualification remains outstanding.
+It remains labelled Experimental, with manual addition and documented limits;
+inclusion in a stable package is not a support or schema-evidence promotion.
 Prerelease versions are stamped only in the packaged artifact; feature branches retain the current stable source version so release-candidate metadata cannot leak into master.
 
 ## Device-owner validation
